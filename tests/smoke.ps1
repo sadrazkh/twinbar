@@ -25,6 +25,13 @@ $powershellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershe
 $root = Join-Path ([IO.Path]::GetTempPath()) ('twinbar test ' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $twHome = Join-Path $root 'home'
 $menu = Join-Path $root 'start menu'
+$pinned = Join-Path $root 'pinned'
+# Store apps' data must live outside AppData; the temp folder usually is inside it.
+$storeData = if ($root.StartsWith([Environment]::GetFolderPath('UserProfile') + '\AppData\', [StringComparison]::OrdinalIgnoreCase)) {
+  Join-Path ([Environment]::GetFolderPath('UserProfile')) ('twinbar-test-' + (Split-Path -Leaf $root).Substring(13))
+} else {
+  Join-Path $root 'store data'
+}
 $script:passed = 0
 $script:failed = 0
 $script:fakeBuilt = $null
@@ -82,6 +89,8 @@ function Invoke-Cli([string[]] $Arguments) {
   $psi.RedirectStandardError = $true
   $psi.CreateNoWindow = $true
   $psi.EnvironmentVariables['TWINBAR_HOME'] = $twHome
+  $psi.EnvironmentVariables['TWINBAR_PINNED_DIR'] = $pinned
+  $psi.EnvironmentVariables['TWINBAR_STORE_DATA'] = $storeData
   $proc = [Diagnostics.Process]::Start($psi)
   $out = $proc.StandardOutput.ReadToEndAsync()
   $err = $proc.StandardError.ReadToEndAsync()
@@ -137,19 +146,8 @@ function Get-LaunchersFor([string] $Id) {
       Where-Object { $_.CommandLine -match ('\s' + [regex]::Escape($Id) + '\s*$') })
 }
 
-# The taskbar's buttons, by the AppUserModelID each stands for; $null when there's
-# no taskbar to ask (for example on a build server).
-function Get-TaskbarAppIds {
-  Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-  $a = [System.Windows.Automation.AutomationElement]
-  $condition = New-Object System.Windows.Automation.PropertyCondition($a::ClassNameProperty, 'Shell_TrayWnd')
-  $tray = $a::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
-  if ($null -eq $tray) { return $null }
-  $ids = @()
-  foreach ($e in $tray.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
-    if ($e.Current.AutomationId -like 'Appid:*') { $ids += $e.Current.AutomationId.Substring(6).Trim() }
-  }
-  return , $ids
+function Read-Record([string] $Id) {
+  [IO.File]::ReadAllText((Join-Path $twHome "profiles\$Id.json")) | ConvertFrom-Json
 }
 
 # The images in an .ico file: size, and whether it's stored as PNG.
@@ -166,10 +164,16 @@ function Read-IcoInfo([string] $Path) {
   [pscustomobject]@{ Type = [BitConverter]::ToUInt16($b, 2); Images = $images }
 }
 
-# The average hue (0-360) of the clearly coloured, opaque pixels of an image.
-function Get-MainHue([string] $PngPath) {
+function Get-HueDistance([double] $A, [double] $B) {
+  $d = [Math]::Abs($A - $B) % 360
+  return [Math]::Min($d, 360 - $d)
+}
+
+# The average hue (0-360) of the clearly coloured, opaque pixels of an image
+# (a PNG file, or a bitmap).
+function Get-MainHue($Image) {
   Add-Type -AssemblyName System.Drawing
-  $bmp = New-Object Drawing.Bitmap $PngPath
+  $bmp = if ($Image -is [Drawing.Bitmap]) { $Image } else { New-Object Drawing.Bitmap $Image }
   try {
     $x = 0.0; $y = 0.0
     for ($j = 0; $j -lt $bmp.Height; $j += 4) {
@@ -243,6 +247,8 @@ try {
   # -------------------------------------------------------------------------
   Write-Section 'Unit checks'
   $env:TWINBAR_HOME = $twHome
+  $env:TWINBAR_PINNED_DIR = $pinned
+  $env:TWINBAR_STORE_DATA = $storeData
   . $cli
 
   $links = Join-Path $root 'links'
@@ -332,6 +338,52 @@ try {
   Assert-Equal 'tint+badge' (Resolve-Style '') 'style: tint+badge by default'
   Assert-Equal 'badge' (Resolve-Style 'Badge') 'style: badge'
   Assert-Throws { Resolve-Style 'sparkly' } 'style must be' 'style: an unknown one is refused'
+  Assert-Equal 'system' (Resolve-Appearance '') 'appearance: system by default'
+  Assert-Equal 'dark' (Resolve-Appearance 'Dark') 'appearance: dark'
+  Assert-Throws { Resolve-Appearance 'sepia' } 'appearance must be' 'appearance: an unknown one is refused'
+  Assert-Equal '--force-dark-mode' $script:Appearances['dark'] 'appearance: dark is --force-dark-mode'
+  Assert-Equal '--blink-settings=preferredColorScheme=1' $script:Appearances['light'] 'appearance: light prefers the light colour scheme'
+
+  $old = [pscustomobject]@{ schema = 1; id = 'fakeapp.old'; name = 'Old'; appName = 'Fake App'; launchExe = $stdExe; realExe = $stdExe; dataDir = 'x'; shortcut = 'y'; aumid = 'Twinbar.fakeapp.old' }
+  $table = ConvertTo-ProfileTable $old
+  Assert-Equal 'standard|tint+badge|O|system' ('{0}|{1}|{2}|{3}' -f $table.appKind, $table.style, $table.badge, $table.appearance) 'an 0.1.0 record gets the new defaults'
+  Assert-Equal (Resolve-ProfileColor '' 'fakeapp.old') $table.color "an 0.1.0 record gets its name's colour"
+  $iconA = Get-IconPath $table
+  $table.color = '#E5484D'
+  Assert-True ((Get-IconPath $table) -ne $iconA) 'a new look gets a new icon file name'
+  Assert-True ((Split-Path -Leaf $iconA) -match '^fakeapp\.old-[0-9a-f]{8}\.ico$') 'icon file names are <id>-<hash>.ico'
+
+  # A Store package, as Windows describes it in AppxManifest.xml.
+  $pkgDir = Join-Path $root 'apps\StorePkg'
+  New-ElectronDir (Join-Path $pkgDir 'app')
+  New-FakeExe (Join-Path $pkgDir 'helper\Helper.exe')
+  [IO.File]::WriteAllText((Join-Path $pkgDir 'AppxManifest.xml'), @'
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5">
+  <Applications>
+    <Application Id="Main" Executable="app\FakeApp.exe" EntryPoint="Windows.FullTrustApplication">
+      <Extensions>
+        <uap5:Extension Category="windows.appExecutionAlias"><uap5:AppExecutionAlias><uap5:ExecutionAlias Alias="fake-app.exe" /></uap5:AppExecutionAlias></uap5:Extension>
+      </Extensions>
+    </Application>
+    <Application Id="Helper" Executable="helper\Helper.exe" EntryPoint="Windows.FullTrustApplication" />
+  </Applications>
+</Package>
+'@)
+  $entries = @(Get-StoreAppEntries ([pscustomobject]@{ InstallLocation = $pkgDir; PackageFamilyName = 'Fake.App_abc123' }))
+  Assert-Equal 'Main Helper' (($entries | ForEach-Object { $_.AppId }) -join ' ') 'Store manifest: both apps found'
+  Assert-Equal 'fake-app.exe' ($entries[0].Aliases -join ',') 'Store manifest: the alias found'
+  Assert-Equal (Join-Path $pkgDir 'app\FakeApp.exe') $entries[0].Exe 'Store manifest: the exe found'
+  Assert-Throws { Resolve-ElectronApp 'NoSuchApp4711' } "no file, folder or Microsoft Store app" 'an unknown Store app name is refused'
+  $claude = @(Get-AppxPackage -Name Claude -ErrorAction SilentlyContinue | Where-Object { Test-ElectronDir (Join-Path $_.InstallLocation 'app') })
+  if ($claude.Count) {
+    $s = Resolve-ElectronApp 'Claude'
+    Assert-Equal "store|claude|$($claude[0].PackageFamilyName)!Claude" ('{0}|{1}|{2}' -f $s.Kind, $s.Id, $s.PackageApp) 'Store app by name: Claude'
+    Assert-Equal $s.PackageApp (Resolve-ElectronApp $s.PackageApp).PackageApp 'Store app by app id'
+    Assert-Equal $s.PackageApp (Resolve-ElectronApp $s.LaunchExe).PackageApp 'Store app by its exe under WindowsApps'
+  } else {
+    Write-Host '  skip  Store app lookups (Claude from the Microsoft Store is not installed)'
+  }
 
   # Icons, drawn from Explorer's icon (any exe with an icon would do).
   Initialize-Interop
@@ -375,12 +427,14 @@ try {
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-Style', 'sparkly', '-ShortcutDir', $menu)) 1 'style must be' 'new with an unknown style fails'
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-Badge', 'ABC', '-ShortcutDir', $menu)) 1 '1 or 2' 'new with a long badge fails'
 
-  $r = Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-Color', 'green', '-ShortcutDir', $menu)
+  Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-Appearance', 'sepia', '-ShortcutDir', $menu)) 1 'appearance must be' 'new with an unknown appearance fails'
+
+  $r = Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-Color', 'green', '-Appearance', 'dark', '-ShortcutDir', $menu)
   Assert-Cli $r 0 'Made "Fake App Work"' 'new Work'
-  Assert-Cli $r 0 'colour #30A46C, badge W' 'it reports the icon'
+  Assert-Cli $r 0 'colour #30A46C, badge W; always dark' 'it reports the icon and appearance'
   $workLink = Join-Path $menu 'Fake App Work.lnk'
   $workData = Join-Path $twHome 'data\fakeapp\work'
-  $workIcon = Join-Path $twHome 'icons\fakeapp.work.ico'
+  $workIcon = (Read-Record 'fakeapp.work').icon
   $launcher = Join-Path $twHome 'bin\twinbar-launcher.exe'
   Assert-True (Test-Path -LiteralPath $launcher) 'the launcher was built'
   Assert-Equal "$version.0" ([Diagnostics.FileVersionInfo]::GetVersionInfo($launcher).FileVersion) "the launcher is version $version"
@@ -395,14 +449,15 @@ try {
     Assert-Equal $workIcon $l.IconPath "shortcut: the profile's icon"
   }
   Assert-Equal 'fakeapp.work' ([IO.File]::ReadAllText((Join-Path $workData '.twinbar-profile'))) 'the data folder has the marker'
-  $record = [IO.File]::ReadAllText((Join-Path $twHome 'profiles\fakeapp.work.json')) | ConvertFrom-Json
-  Assert-Equal 'tint+badge|#30A46C|W' ('{0}|{1}|{2}' -f $record.style, $record.color, $record.badge) 'the record has the look'
+  $record = Read-Record 'fakeapp.work'
+  Assert-Equal 'tint+badge|#30A46C|W|dark|--force-dark-mode|3' ('{0}|{1}|{2}|{3}|{4}|{5}' -f $record.style, $record.color, $record.badge, $record.appearance, $record.extraArgs, $record.schema) 'the record has the look and appearance'
   Assert-Equal $stdExe $record.launchExe 'the record has the app'
+  Assert-True ($workIcon -like (Join-Path $twHome 'icons\fakeapp.work-*.ico')) "the icon is in Twinbar's icons folder"
 
   $r = Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Plain', '-Style', 'original', '-ShortcutDir', $menu)
   Assert-Cli $r 0 "the app's own icon" 'new with -Style original'
   Assert-Equal $stdExe (Read-ShellLink (Join-Path $menu 'Fake App Plain.lnk')).IconPath "-Style original keeps the app's icon"
-  Assert-True (-not (Test-Path -LiteralPath (Join-Path $twHome 'icons\fakeapp.plain.ico'))) '-Style original draws no icon'
+  Assert-Equal '' (Read-Record 'fakeapp.plain').icon '-Style original draws no icon'
 
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-ShortcutDir', $menu)) 1 'already a profile' 'the same profile twice fails'
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'WORK', '-ShortcutDir', $menu)) 1 'already a profile' 'names differing only in case clash'
@@ -412,8 +467,7 @@ try {
 
   $r = Invoke-Cli @('new', 'Home', '-App', $sqExe, '-ShortcutDir', $menu)
   Assert-Cli $r 0 'Made "Fake App Home"' 'new Home (name given first) for the Squirrel app'
-  $homeRecord = [IO.File]::ReadAllText((Join-Path $twHome 'profiles\fakeapp.home.json')) | ConvertFrom-Json
-  Assert-Equal $sqExe $homeRecord.launchExe "a Squirrel app is started through Squirrel's launcher"
+  Assert-Equal $sqExe (Read-Record 'fakeapp.home').launchExe "a Squirrel app is started through Squirrel's launcher"
 
   Assert-Cli (Invoke-Cli @('new', '-App', $otherExe, '-Name', 'Home', '-ShortcutDir', $menu)) 1 'already a shortcut' "an existing shortcut isn't overwritten"
   $menu2 = Join-Path $root 'other menu'
@@ -439,8 +493,11 @@ try {
   $launched = Join-Path $workData 'launched.txt'
   Assert-True (Wait-Until { Test-Path -LiteralPath $launched } 20) 'the app started'
   if (Test-Path -LiteralPath $launched) {
-    $datadirLine = @([IO.File]::ReadAllLines($launched) | Where-Object { $_ -like 'datadir=*' })[0]
+    $lines = [IO.File]::ReadAllLines($launched)
+    $datadirLine = @($lines | Where-Object { $_ -like 'datadir=*' })[0]
     Assert-Equal "datadir=$workData" $datadirLine 'the app got its own data folder'
+    $commandLine = @($lines | Where-Object { $_ -like 'commandline=*' })[0]
+    Assert-True ($commandLine -match '--force-dark-mode') 'the app was asked to be dark' $commandLine
   }
   Assert-True (Wait-Until { @(Get-ProcessesFor $workData).Count -gt 0 } 10) 'the running app is found by its data folder'
   Assert-Equal 1 @(Get-LaunchersFor 'fakeapp.work').Count 'the launcher is looking after it'
@@ -456,6 +513,14 @@ try {
   if ($haveWindow) {
     $tagged = Wait-Until { [TwinbarInterop.Shell]::GetWindowAppId($script:fakeWindow) -eq 'Twinbar.fakeapp.work' } 10
     Assert-True $tagged "the window carries the profile's ID, though the app set its own" ("window ID: '{0}'" -f [TwinbarInterop.Shell]::GetWindowAppId($script:fakeWindow))
+    $script:windowHue = -1
+    $iconSet = Wait-Until {
+      $bmp = [TwinbarInterop.IconMaker]::FromHandle([TwinbarInterop.Shell]::GetWindowIcon($script:fakeWindow, $true))
+      if ($null -eq $bmp) { return $false }
+      $script:windowHue = Get-MainHue $bmp
+      return ([Math]::Abs($script:windowHue - 151) -lt 25)
+    } 10
+    Assert-True $iconSet "the window shows the profile's icon (title bar, Alt+Tab)" "hue $([int]$script:windowHue)"
     if ($null -eq (Get-TaskbarAppIds)) {
       Write-Host '  skip  taskbar button (no taskbar here)'
     } else {
@@ -465,6 +530,9 @@ try {
   }
   Assert-Equal 'running' (@(Get-ListRows | Where-Object { $_.id -eq 'fakeapp.work' })[0]).status 'list shows Work running'
   Assert-Cli (Invoke-Cli @('remove', 'Work')) 1 'running' "a running profile isn't removed"
+  Assert-Cli (Invoke-Cli @('change', 'Work', '-Color', 'red')) 1 'running' "a running profile isn't changed"
+  Assert-Cli (Invoke-Cli @('rebuild', 'Work')) 1 'running' "a running profile isn't rebuilt"
+  Assert-Cli (Invoke-Cli @('doctor', 'Work')) 0 'running, looked after by the launcher' 'doctor sees it running'
   Assert-Cli (Invoke-Cli @('open', 'Work')) 0 'Opening' 'opening it again while it runs'
   Assert-True (Wait-Until { @(Get-LaunchersFor 'fakeapp.work').Count -le 1 } 10) 'still only one launcher looks after it'
   Remove-Item -LiteralPath (Join-Path $workData 'stay.txt')
@@ -474,6 +542,76 @@ try {
   $logText = if (Test-Path -LiteralPath $log) { [IO.File]::ReadAllText($log) } else { '' }
   Assert-True ($logText -match 'fakeapp\.work: the app quit; [1-9]\d* window\(s\) tagged') 'the launcher logged what it did' $logText.Trim()
   Remove-Item -LiteralPath (Join-Path $workData 'window.txt')
+
+  # -------------------------------------------------------------------------
+  Write-Section 'Changing a profile'
+  [void][IO.Directory]::CreateDirectory($pinned)
+  $pin = Join-Path $pinned 'Fake App Work.lnk'
+  Save-ShellLink -Path $pin -TargetPath $launcher -Arguments 'fakeapp.work' -IconPath $workIcon -AppUserModelId 'Twinbar.fakeapp.work'
+  $otherPin = Join-Path $pinned 'Something Else.lnk'
+  Save-ShellLink -Path $otherPin -TargetPath $stdExe -IconPath $stdExe -AppUserModelId 'Someone.Else'
+  Assert-Cli (Invoke-Cli @('change', 'Work')) 1 'nothing to change' 'change with nothing to change fails'
+  Assert-Cli (Invoke-Cli @('change', 'Work', '-Badge', 'ABC')) 1 '1 or 2' 'change with a bad badge fails'
+  $r = Invoke-Cli @('change', 'Work', '-Color', 'red', '-Badge', 'X', '-Appearance', 'light')
+  Assert-Cli $r 0 'colour #E5484D, badge X; always light' 'change Work'
+  Assert-Cli $r 0 'Updated 1 taskbar pin' 'it updated the taskbar pin'
+  $changed = Read-Record 'fakeapp.work'
+  Assert-Equal '#E5484D|X|light|--blink-settings=preferredColorScheme=1' ('{0}|{1}|{2}|{3}' -f $changed.color, $changed.badge, $changed.appearance, $changed.extraArgs) 'the record has the new look'
+  Assert-True ($changed.icon -ne $workIcon -and (Test-Path -LiteralPath $changed.icon)) 'a new icon file was drawn'
+  Assert-True (-not (Test-Path -LiteralPath $workIcon)) 'the old icon file is gone'
+  Assert-Equal $changed.icon (Read-ShellLink $workLink).IconPath 'the Start menu shortcut shows the new icon'
+  Assert-Equal $changed.icon (Read-ShellLink $pin).IconPath 'the taskbar pin shows the new icon'
+  Assert-Equal $stdExe (Read-ShellLink $otherPin).IconPath "other pins aren't touched"
+  $redHue = Get-MainHue ([TwinbarInterop.IconMaker]::Extract($changed.icon, 0, 256))
+  Assert-True ((Get-HueDistance $redHue 358) -lt 15) 'the new icon is red' "hue $([int]$redHue)"
+  Assert-Equal "fakeapp.work" ([IO.File]::ReadAllText((Join-Path $workData '.twinbar-profile'))) 'the data folder is untouched'
+  $workIcon = $changed.icon
+
+  # -------------------------------------------------------------------------
+  Write-Section 'Rebuilding and doctor'
+  Assert-Cli (Invoke-Cli @('doctor')) 0 'No problems found' 'doctor: all fine'
+  Remove-Item -LiteralPath $workLink
+  $r = Invoke-Cli @('doctor', 'Work')
+  Assert-Cli $r 1 'shortcut: .* is missing; run: twinbar rebuild fakeapp\.work' 'doctor: a missing shortcut is found'
+  Assert-Cli $r 1 '1 problem\(s\) found' 'doctor: it fails'
+  Assert-Cli (Invoke-Cli @('rebuild', 'Work')) 0 'Rebuilt "Fake App Work"' 'rebuild Work'
+  Assert-True (Test-Path -LiteralPath $workLink) 'the shortcut is back'
+  Assert-Cli (Invoke-Cli @('doctor', 'Work')) 0 'No problems found' 'doctor: fine again'
+
+  New-ElectronDir (Join-Path $sq 'app-1.11.0')
+  Assert-Cli (Invoke-Cli @('rebuild', 'fakeapp.home')) 0 'app-1\.11\.0' 'rebuild follows a Squirrel update'
+  Assert-Equal (Join-Path $sq 'app-1.11.0\FakeApp.exe') (Read-Record 'fakeapp.home').realExe 'the record has the new version'
+
+  $movable = Join-Path $root 'apps\Movable'
+  New-ElectronDir $movable
+  Assert-Cli (Invoke-Cli @('new', '-App', (Join-Path $movable 'FakeApp.exe'), '-Name', 'Mover', '-ShortcutDir', $menu)) 0 'Made' 'new Mover'
+  $moved = Join-Path $root 'apps\Moved'
+  Rename-Item -LiteralPath $movable -NewName 'Moved'
+  Assert-Cli (Invoke-Cli @('doctor', 'Mover')) 1 'If it moved, run: twinbar rebuild fakeapp\.mover -App' 'doctor: a moved app is found'
+  Assert-Cli (Invoke-Cli @('rebuild', 'Mover')) 1 'If the app moved' "rebuild says how to point at the app's new place"
+  Assert-Cli (Invoke-Cli @('rebuild', 'Mover', '-App', $otherExe)) 1 "that's another app" "rebuild won't switch to another app"
+  Assert-Cli (Invoke-Cli @('rebuild', 'Mover', '-App', (Join-Path $moved 'FakeApp.exe'))) 0 'Rebuilt' "rebuild with the app's new place"
+  Assert-Equal (Join-Path $moved 'FakeApp.exe') (Read-Record 'fakeapp.mover').launchExe 'the record has the new place'
+
+  # A profile as Twinbar 0.1.0 left it: a shortcut straight to the app, no icon.
+  $legacyData = Join-Path $twHome 'data\fakeapp\legacy'
+  [void][IO.Directory]::CreateDirectory($legacyData)
+  [IO.File]::WriteAllText((Join-Path $legacyData '.twinbar-profile'), 'fakeapp.legacy')
+  $legacyLink = Join-Path $menu 'Fake App Legacy.lnk'
+  Save-ShellLink -Path $legacyLink -TargetPath $stdExe -Arguments "--user-data-dir=""$legacyData""" -AppUserModelId 'Twinbar.fakeapp.legacy'
+  $legacy = [ordered]@{ schema = 1; id = 'fakeapp.legacy'; name = 'Legacy'; appName = 'Fake App'; appId = 'fakeapp'; appKind = 'standard'
+    launchExe = $stdExe; realExe = $stdExe; dataDir = $legacyData; shortcut = $legacyLink; aumid = 'Twinbar.fakeapp.legacy'
+    created = '2026-11-22T00:00:00'; twinbarVersion = '0.1.0' }
+  [IO.File]::WriteAllText((Join-Path $twHome 'profiles\fakeapp.legacy.json'), ($legacy | ConvertTo-Json))
+  Assert-Cli (Invoke-Cli @('doctor', 'Legacy')) 1 'made with an older Twinbar \(0\.1\.0\)' 'doctor: an 0.1.0 profile is found'
+  Assert-Cli (Invoke-Cli @('rebuild', '-All')) 0 'Rebuilt "Fake App Legacy"' 'rebuild -All'
+  $upgraded = Read-Record 'fakeapp.legacy'
+  Assert-Equal '3|tint+badge|L' ('{0}|{1}|{2}' -f $upgraded.schema, $upgraded.style, $upgraded.badge) 'the 0.1.0 profile is up to date'
+  Assert-Equal $launcher (Read-ShellLink $legacyLink).TargetPath 'its shortcut now starts the launcher'
+  Assert-True (Test-Path -LiteralPath $upgraded.icon) 'it has an icon now'
+  Assert-Cli (Invoke-Cli @('doctor')) 0 'No problems found' 'doctor: all fine after rebuild -All'
+  Assert-Cli (Invoke-Cli @('remove', 'fakeapp.legacy', '-DeleteData')) 0 'Removed' 'remove Legacy'
+  Assert-Cli (Invoke-Cli @('remove', 'fakeapp.mover', '-DeleteData')) 0 'Removed' 'remove Mover'
 
   # -------------------------------------------------------------------------
   Write-Section 'Removing'
@@ -513,6 +651,10 @@ try {
       Assert-True (Test-Path -LiteralPath $full.launchExe) 'the profile starts an existing program'
       Assert-Equal $rec.id $l.Arguments 'the shortcut starts the launcher with the profile id'
       Assert-Equal 8 @((Read-IcoInfo $rec.icon).Images).Count "the app's icon was redrawn"
+      if ($rec.appKind -eq 'store') {
+        Assert-True ($rec.dataDir.StartsWith($storeData + '\', [StringComparison]::OrdinalIgnoreCase)) "a Store app's data is kept outside AppData" $rec.dataDir
+        Assert-True ($full.packageApp -match '!') "it's started through its package ($($full.packageApp))"
+      }
       if ($Launch) {
         Assert-Cli (Invoke-Cli @('open', $rec.id)) 0 'Opening' 'open it'
         Assert-True (Wait-Until { @(Get-ChildItem -LiteralPath $rec.dataDir -Force | Where-Object { $_.Name -ne '.twinbar-profile' }).Count -ge 2 } 60) 'the app keeps its data in the profile folder'
@@ -536,8 +678,11 @@ try {
     }
   }
 } finally {
-  Remove-Item Env:\TWINBAR_HOME -ErrorAction SilentlyContinue
+  Remove-Item Env:\TWINBAR_HOME, Env:\TWINBAR_PINNED_DIR, Env:\TWINBAR_STORE_DATA -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+  if (-not $storeData.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+    Remove-Item -LiteralPath $storeData -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }
 
 Write-Host ''

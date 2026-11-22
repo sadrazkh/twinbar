@@ -1,17 +1,19 @@
 # Twinbar
 
 A second, separately signed-in copy of your Electron apps on Windows: work and
-personal Slack, two Postman accounts, a test login next to your real one.
+personal Slack, two Claude or Postman accounts, a test login next to your real one.
 
 Twinbar adds an entry such as **Postman Work** to the Start menu. It opens the
 same installed app, with its own sign-in, settings and local data, and its own
 taskbar button and icon. The original app isn't changed, and both can run at
-the same time.
+the same time. Microsoft Store apps such as Claude work too.
 
 ![The same app's icon in Twinbar's four styles: original, colour and badge, colour only, badge only](docs/styles.png)
 
-> **Status: early (0.2.0).** Phases 1 and 2 of 5 are done: the command line,
-> and an own icon and taskbar button. See [docs/phases.md](docs/phases.md).
+> **Status: early (0.3.0).** Phases 1 to 3 of 5 are done: the command line, an
+> own icon and taskbar button, and changing and repairing profiles, light/dark
+> and Store apps. A window to do it all without a terminal comes next. See
+> [docs/phases.md](docs/phases.md).
 
 ## Requirements
 
@@ -36,11 +38,12 @@ Or download the repository as a zip and unpack it anywhere. `twinbar.cmd` runs
 ## Use it
 
 Make a profile. `-App` takes the app's `.exe`, its install folder or its Start
-menu shortcut:
+menu shortcut, or a Microsoft Store app's name:
 
 ```powershell
 .\twinbar.cmd new -App "C:\Program Files\Bruno\Bruno.exe" -Name Work
 .\twinbar.cmd new -App "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Postman\Postman.lnk" -Name Personal -Color green
+.\twinbar.cmd new -App Claude -Name Work -Appearance dark
 ```
 
 Then open **Bruno Work** from the Start menu (it's in the *Twinbar* folder), or:
@@ -51,6 +54,15 @@ Then open **Bruno Work** from the Start menu (it's in the *Twinbar* folder), or:
 ```
 
 It gets a taskbar button of its own; pin it like any other.
+
+Change its look, or repair it after the app moved or something got deleted;
+`doctor` says what's wrong and what to run:
+
+```powershell
+.\twinbar.cmd change "Bruno Work" -Color red -Badge B
+.\twinbar.cmd rebuild "Bruno Work" -App "D:\Apps\Bruno\Bruno.exe"
+.\twinbar.cmd doctor
+```
 
 Remove a profile. Its sign-in is kept, so making the profile again brings it
 back, unless you add `-DeleteData`:
@@ -66,19 +78,26 @@ digits, spaces, `.`, `_` and `-`.
 
 | Command | What it does |
 |---|---|
-| `new -App PATH -Name NAME` | Make a profile. See the options below. |
+| `new -App APP -Name NAME` | Make a profile. See the options below. |
+| `change PROFILE` | Change its `-Color`, `-Badge`, `-Style` or `-Appearance`. Its name and data stay; taskbar pins get the new icon too. |
+| `rebuild PROFILE [-App APP]` | Make its shortcut, icon and launcher again. `-App` points it at the app's new place. |
+| `rebuild -All` | The same for every profile; run it after updating Twinbar |
+| `doctor [PROFILE]` | Check Twinbar and the profiles, and say how to fix what's wrong |
 | `list [-Json]` | Show the profiles and whether each is running |
 | `open PROFILE` | Start a profile |
 | `remove PROFILE [-DeleteData]` | Remove a profile's shortcut and icon; with `-DeleteData`, its data too |
 | `help`, `version` | |
 
-Options for `new`:
+A running profile isn't changed, rebuilt or removed; quit it first.
+
+Options for `new` (and, except the last three, `change`):
 
 | Option | |
 |---|---|
 | `-Color C` | `blue`, `green`, `purple`, `orange`, `pink`, `teal`, `red`, `indigo`, `yellow`, `gray` or `#RRGGBB`. By default a colour is picked from the name. |
 | `-Badge B` | 1 or 2 letters or digits. By default the name's first letter. |
 | `-Style S` | `tint+badge` (default), `tint` (colour only), `badge` (original colours and a badge) or `original` (the app's own icon) |
+| `-Appearance A` | `system` (default), `light` or `dark`. Works for apps that follow Windows' light or dark setting; apps with their own theme setting keep it per profile anyway. |
 | `-DataDir DIR` | Keep the profile's data in another folder |
 | `-AdoptDataDir` | Use a data folder that already has data in it |
 | `-ShortcutDir DIR` | Put the shortcut somewhere other than the Start menu |
@@ -95,38 +114,40 @@ the whole app, so on its own a second copy would join the original's button.
 A profile's shortcut therefore starts a small **launcher**, which starts the app
 and then puts the profile's own ID, name and icon on the app's windows. The
 taskbar then shows them as a button of their own, and pinning it pins the
-profile. The launcher only sets these window properties: it doesn't inject
-anything into the app or change it. It stays in the background while the
-profile is open and quits after it closes.
+profile; the window's title bar and Alt+Tab show the profile's icon too. The
+launcher only sets these window properties: it doesn't inject anything into the
+app or change it. It stays in the background while the profile is open and
+quits after it closes.
 
 | | |
 |---|---|
 | Start menu entry | `Start Menu\Programs\Twinbar\<App> <Name>.lnk`. It starts the launcher with the profile's id and carries the profile's AppUserModelID (`Twinbar.<app>.<name>`). |
 | Launcher | `%APPDATA%\Twinbar\bin\twinbar-launcher.exe`, compiled on your computer from the source inside `twinbar.ps1` the first time it's needed, and again after a Twinbar update. Its log is `%APPDATA%\Twinbar\logs\launcher.log`. |
-| Icons | `%APPDATA%\Twinbar\icons\<app>.<name>.ico`, drawn from the app's own icon, 16 to 256 pixels |
+| Icons | `%APPDATA%\Twinbar\icons\<app>.<name>-<hash>.ico`, drawn from the app's own icon, 16 to 256 pixels. The name changes with the look, so Windows never shows a stale icon. |
 | Profile data | `%APPDATA%\Twinbar\data\<app>\<name>\`, with a small `.twinbar-profile` marker file |
 | Profile records | `%APPDATA%\Twinbar\profiles\<app>.<name>.json` |
 | Normal installs | The app's own `.exe` is started. |
 | Squirrel installs (Slack, Discord, Postman...) | The launcher in the app's install folder is started; it always runs the newest version, so profiles keep working after the app updates. |
+| Microsoft Store apps (Claude...) | Started through Windows' package activation, with the profile's arguments. Their data is kept in `%USERPROFILE%\Twinbar\<app>\<name>\`: Windows redirects what a Store app writes under AppData into the app's own package, where Twinbar couldn't see or remove it. |
 
 Twinbar never modifies the app. Removing moves files to the Recycle Bin, and a
 data folder is only ever removed if it carries that profile's marker.
 
 ## Limitations
 
-- **Window icon:** the taskbar button and the Start menu show the profile's
-  icon, but the app's own window (title bar, Alt+Tab) keeps the app's icon.
 - **Shared storage:** data an app keeps outside its data folder is shared
   between profiles, for example passwords some apps store in Windows
   Credential Manager, or settings in the registry.
-- **Microsoft Store apps** (installed under `WindowsApps`, such as Claude) aren't
-  supported yet; that's phase 3.
-- **Profiles made with 0.1.0** keep working but have no icon or taskbar button
-  of their own; make them again (`remove`, then `new`; the sign-in is kept).
+- **Appearance** only reaches apps that follow Windows' light or dark setting.
+- **Window icon:** it's set by the launcher, so if the launcher is stopped while
+  the profile is open, the window shows a blank icon until the profile is
+  opened again.
+- **After updating Twinbar,** run `twinbar rebuild -All`; profiles made with
+  0.1.0 get their icon and taskbar button that way, and the sign-in is kept.
 - Where policy blocks programs in your user folder (AppLocker and the like),
   the launcher can't run.
-- Tested so far with Bruno 4.3 (normal install) and Postman 12.33 (Squirrel
-  install), on Windows 11.
+- Tested so far on Windows 11 with Bruno 4.3 (normal install), Postman 12.33
+  (Squirrel install) and Claude 6.28 (Microsoft Store).
 
 ## Tests
 
@@ -135,11 +156,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\smoke.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\smoke.ps1 -RealApp "C:\Program Files\Bruno\Bruno.exe" -Launch
 ```
 
-The tests build a fake Electron app and work in a temporary folder, never in
-your Start menu or profiles. A few small test files go to the Recycle Bin. The
-fake app briefly shows a window, to check that it gets a taskbar button of its
-own. With `-RealApp ... -Launch`, the real app is opened once with an empty
-data folder and closed again.
+The tests build a fake Electron app and work in temporary folders, never in
+your Start menu, taskbar pins or profiles. A few small test files go to the
+Recycle Bin. The fake app briefly shows a window, to check that it gets a
+taskbar button and icon of its own. With `-RealApp ... -Launch`, the real app
+(`-RealApp Claude` for the Store app) is opened once, signed out, with an empty
+data folder, and closed again; a copy of it you already have open isn't touched.
 
 ## Credits and licence
 

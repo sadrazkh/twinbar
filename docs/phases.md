@@ -7,8 +7,8 @@ Twinbar is built in five phases. Each phase ends with working, tested code on
 |---|---|---|
 | 1 | Core command line: profiles with their own sign-in, from the Start menu | Done (0.1.0) |
 | 2 | Own icon and own taskbar button | Done (0.2.0) |
-| 3 | Change and repair profiles; light/dark; Microsoft Store apps | Next |
-| 4 | The Twinbar app: windows and forms, no terminal needed | Planned |
+| 3 | Change and repair profiles; light/dark; Microsoft Store apps | Done (0.3.0) |
+| 4 | The Twinbar app: windows and forms, no terminal needed | Next |
 | 5 | CI, signed releases, winget/Scoop, docs | Planned |
 
 ## Phase 1: core command line
@@ -70,14 +70,39 @@ pin (the relaunch command and icon are set for it).
 
 ## Phase 3: change and repair profiles, more apps
 
-- `change` (colour, badge, appearance; the name and data folder stay),
-  `rebuild` (repair shortcuts after an app moves or is reinstalled, and bring
-  0.1.0 profiles up to date), `doctor` (what the taskbar sees, launcher log).
-- Appearance per profile: light, dark or the same as Windows.
-- Microsoft Store (MSIX) apps such as Claude: start them through package
-  activation with arguments, and keep their data outside AppData so Windows'
-  per-package redirection doesn't hide it.
-- Look into giving the app's window the profile's icon too (title bar, Alt+Tab).
+- `change PROFILE` (colour, badge, style, appearance; the name and data folder
+  stay). Icon files are named after their look (`<id>-<hash>.ico`) so Windows'
+  icon cache can't show the old one, and taskbar pins with the profile's ID
+  are pointed at the new icon.
+- `rebuild PROFILE [-App APP]` and `rebuild -All`: the shortcut, icon, pins,
+  launcher and record again, from the record. Follows Squirrel updates, moves
+  a profile to the app's new place (only the same app: the id comes from the
+  exe's name), and brings 0.1.0 and 0.2.0 profiles up to date.
+- `doctor [PROFILE]`: app, shortcut, icon, data folder, launcher, taskbar
+  button (through UI Automation) and the last log lines, each with what to run
+  to fix it. Fails (exit code 1) when it finds a problem.
+- `-Appearance system|light|dark`: the same Chromium switches DoppelDock uses,
+  `--blink-settings=preferredColorScheme=1` and `--force-dark-mode`.
+- The launcher gives the app's windows the profile's icon too (`WM_SETICON`,
+  sized for each window's DPI), checked again every 0.4 s.
+- Microsoft Store (MSIX) apps. Measured with Claude 6.28 first:
+  `IApplicationActivationManager::ActivateApplication("<family>!<app>", args)`
+  starts a second copy with the arguments, like any desktop app; its window
+  joins the package's taskbar button, and the window property moves it to its
+  own, as for other apps. Claude's package has file-system write virtualization
+  on, so what it writes under AppData lands in the package's `LocalCache`;
+  Store profiles therefore keep their data in `%USERPROFILE%\Twinbar`, and
+  `new` refuses a `-DataDir` under AppData for them. Apps are found by package
+  name (`-App Claude`), app id, exe under WindowsApps, or execution alias, from
+  each package's `AppxManifest.xml`.
+
+Done: 212 checks with the fake app (227 with a real one), and Bruno, Postman and
+Claude each opened through their profiles with their own taskbar button, and
+closed again without touching the copy already open. Checked on a real Bruno
+window: title bar and Alt+Tab icons in the profile's colour.
+
+Still not checked by hand: pinning a profile's button and opening it from the
+pin.
 
 ## Phase 4: the Twinbar app
 

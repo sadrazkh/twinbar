@@ -3,15 +3,19 @@
 Twinbar: a second, separately signed-in copy of an Electron app on Windows.
 
 .DESCRIPTION
-  twinbar new -App PATH -Name NAME [-Color C] [-Badge B] [-Style S]
+  twinbar new -App APP -Name NAME [-Color C] [-Badge B] [-Style S] [-Appearance A]
               [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
+  twinbar change PROFILE [-Color C] [-Badge B] [-Style S] [-Appearance A]
+  twinbar rebuild PROFILE [-App APP] | twinbar rebuild -All
+  twinbar doctor [PROFILE]
   twinbar list [-Json]
   twinbar open PROFILE
   twinbar remove PROFILE [-DeleteData]
   twinbar help
   twinbar version
 
-PATH is the app's .exe, its install folder or its Start menu shortcut.
+APP is the app's .exe, its install folder or its Start menu shortcut; for a
+Microsoft Store app, its package name ("Claude") or app id.
 PROFILE is a profile's name ("Work"), its full name ("Postman Work") or its id
 ("postman.work"); see twinbar list.
 
@@ -26,17 +30,19 @@ param(
   [string] $Color,
   [string] $Badge,
   [string] $Style,
+  [string] $Appearance,
   [string] $DataDir,
   [switch] $AdoptDataDir,
   [string] $ShortcutDir,
   [switch] $DeleteData,
+  [switch] $All,
   [switch] $Json
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.2.0'
+$script:TwinbarVersion = '0.3.0'
 $script:MarkerName = '.twinbar-profile' # in each data folder Twinbar created or adopted
 $script:AppIdPrefix = 'Twinbar'          # AppUserModelID: Twinbar.<app id>.<name key>
 $script:LauncherName = 'twinbar-launcher.exe'
@@ -46,6 +52,17 @@ $script:Palette = [ordered]@{
   teal = '#12A594'; red = '#E5484D'; indigo = '#3E63DD'; yellow = '#D4A017'; gray = '#6F6E77'
 }
 $script:Styles = @('tint+badge', 'tint', 'badge', 'original')
+$script:Appearances = [ordered]@{
+  system = ''                                       # whatever Windows uses
+  light  = '--blink-settings=preferredColorScheme=1' # Chromium: prefer the light colour scheme
+  dark   = '--force-dark-mode'                       # Chromium: dark native theme and colour scheme
+}
+# Every field of a profile record, in the order they're written.
+$script:RecordFields = @(
+  'schema', 'id', 'name', 'appName', 'appId', 'appKind', 'launchExe', 'realExe', 'packageApp',
+  'dataDir', 'shortcut', 'aumid', 'launcher', 'style', 'color', 'badge', 'appearance', 'extraArgs',
+  'icon', 'created', 'updated', 'twinbarVersion'
+)
 
 # ---------------------------------------------------------------------------
 # Windows interop: shortcuts with an AppUserModelID, the Recycle Bin, and icons.
@@ -216,6 +233,38 @@ namespace TwinbarInterop {
       if (op.AnyOperationsAborted != 0) throw new InvalidOperationException("moving " + path + " to the Recycle Bin was cancelled");
     }
 
+    // Changes an existing shortcut in place (a taskbar pin, say), keeping everything else in it.
+    public static void UpdateLink(string path, string target, string arguments, string iconPath, int iconIndex) {
+      IShellLinkW link = (IShellLinkW)new ShellLinkObject();
+      try {
+        ((IPersistFile)link).Load(path, 2); // STGM_READWRITE
+        if (!String.IsNullOrEmpty(target)) link.SetPath(target);
+        if (arguments != null) link.SetArguments(arguments);
+        if (!String.IsNullOrEmpty(iconPath)) link.SetIconLocation(iconPath, iconIndex);
+        ((IPersistFile)link).Save(path, true);
+      } finally {
+        Marshal.ReleaseComObject(link);
+      }
+    }
+
+    [DllImport("shell32.dll")]
+    static extern void SHChangeNotify(int eventId, uint flags, IntPtr item1, IntPtr item2);
+
+    // Asks Explorer to redraw icons (Start menu, taskbar pins) after they changed.
+    public static void NotifyIconsChanged() {
+      SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero); // SHCNE_ASSOCCHANGED
+    }
+
+    [DllImport("user32.dll")]
+    static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+
+    // The icon a window shows (title bar, Alt+Tab), or IntPtr.Zero.
+    public static IntPtr GetWindowIcon(IntPtr hwnd, bool big) {
+      IntPtr icon;
+      SendMessageTimeoutW(hwnd, 0x7F, (IntPtr)(big ? 1 : 0), IntPtr.Zero, 2, 500, out icon); // WM_GETICON
+      return icon;
+    }
+
     [DllImport("shell32.dll")]
     static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out IPropertyStore store);
 
@@ -283,6 +332,10 @@ namespace TwinbarInterop {
       }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct BitmapHeader { public int Type; public int Width; public int Height; public int WidthBytes; public ushort Planes; public ushort BitsPixel; public IntPtr Bits; }
+    [DllImport("gdi32.dll")] static extern int GetObject(IntPtr obj, int size, ref BitmapHeader header);
+
     // One size of an icon in a file, with its transparency, or null if the file has none.
     public static Bitmap Extract(string file, int index, int size) {
       IntPtr[] icons = new IntPtr[1];
@@ -290,32 +343,41 @@ namespace TwinbarInterop {
       uint found = PrivateExtractIconsW(file, index, size, size, icons, ids, 1, 0);
       if (found == 0 || found == 0xFFFFFFFF || icons[0] == IntPtr.Zero) return null;
       try {
-        IconInfo info;
-        if (!GetIconInfo(icons[0], out info)) return null;
-        try {
-          if (info.ColorBitmap == IntPtr.Zero) return null;
-          byte[] color = Pixels(info.ColorBitmap, size);
-          if (color == null) return null;
-          bool hasAlpha = false;
-          for (int i = 3; i < color.Length; i += 4) { if (color[i] != 0) { hasAlpha = true; break; } }
-          if (!hasAlpha) {
-            byte[] mask = Pixels(info.MaskBitmap, size);
-            for (int i = 0; i < color.Length; i += 4) color[i + 3] = (byte)(mask != null && mask[i] != 0 ? 0 : 255);
-          }
-          Bitmap bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb);
-          BitmapData data = bitmap.LockBits(new Rectangle(0, 0, size, size), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-          try {
-            for (int y = 0; y < size; y++) Marshal.Copy(color, y * size * 4, new IntPtr(data.Scan0.ToInt64() + (long)y * data.Stride), size * 4);
-          } finally {
-            bitmap.UnlockBits(data);
-          }
-          return bitmap;
-        } finally {
-          if (info.ColorBitmap != IntPtr.Zero) DeleteObject(info.ColorBitmap);
-          if (info.MaskBitmap != IntPtr.Zero) DeleteObject(info.MaskBitmap);
-        }
+        return FromHandle(icons[0]);
       } finally {
         DestroyIcon(icons[0]);
+      }
+    }
+
+    // An icon handle (from a file, or from a window) as a bitmap with its transparency.
+    public static Bitmap FromHandle(IntPtr icon) {
+      if (icon == IntPtr.Zero) return null;
+      IconInfo info;
+      if (!GetIconInfo(icon, out info)) return null;
+      try {
+        if (info.ColorBitmap == IntPtr.Zero) return null;
+        BitmapHeader header = new BitmapHeader();
+        if (GetObject(info.ColorBitmap, Marshal.SizeOf(typeof(BitmapHeader)), ref header) == 0) return null;
+        int size = header.Width;
+        byte[] color = Pixels(info.ColorBitmap, size);
+        if (color == null) return null;
+        bool hasAlpha = false;
+        for (int i = 3; i < color.Length; i += 4) { if (color[i] != 0) { hasAlpha = true; break; } }
+        if (!hasAlpha) {
+          byte[] mask = Pixels(info.MaskBitmap, size);
+          for (int i = 0; i < color.Length; i += 4) color[i + 3] = (byte)(mask != null && mask[i] != 0 ? 0 : 255);
+        }
+        Bitmap bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+        BitmapData data = bitmap.LockBits(new Rectangle(0, 0, size, size), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+        try {
+          for (int y = 0; y < size; y++) Marshal.Copy(color, y * size * 4, new IntPtr(data.Scan0.ToInt64() + (long)y * data.Stride), size * 4);
+        } finally {
+          bitmap.UnlockBits(data);
+        }
+        return bitmap;
+      } finally {
+        if (info.ColorBitmap != IntPtr.Zero) DeleteObject(info.ColorBitmap);
+        if (info.MaskBitmap != IntPtr.Zero) DeleteObject(info.MaskBitmap);
       }
     }
 
@@ -586,6 +648,17 @@ namespace TwinbarLauncher {
   [StructLayout(LayoutKind.Sequential)]
   struct Msg { public IntPtr Hwnd; public uint Message; public IntPtr WParam; public IntPtr LParam; public uint Time; public int X; public int Y; }
 
+  // Starts Microsoft Store (packaged) apps, with arguments, as Windows itself does.
+  [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IApplicationActivationManager {
+    [PreserveSig] int ActivateApplication([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId, [MarshalAs(UnmanagedType.LPWStr)] string arguments, int options, out uint processId);
+    [PreserveSig] int ActivateForFile(IntPtr appUserModelId, IntPtr items, IntPtr verb, out uint processId);
+    [PreserveSig] int ActivateForProtocol(IntPtr appUserModelId, IntPtr items, out uint processId);
+  }
+
+  [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+  class ApplicationActivationManager { }
+
   static class Program {
     delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
     delegate void WinEventProc(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
@@ -609,15 +682,21 @@ namespace TwinbarLauncher {
     [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint ms);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageNameW(IntPtr process, int flags, StringBuilder name, ref int size);
     [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process, int infoClass, IntPtr buffer, int length, out int returned);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr LoadImageW(IntPtr instance, string name, uint type, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
 
     static readonly Guid AppUserModel = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
     static Guid propertyStoreId = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
     const uint RelaunchCommandKey = 2, RelaunchIconKey = 3, RelaunchNameKey = 4, AppIdKey = 5;
     const uint QueryLimited = 0x1000, Synchronize = 0x100000;
     const uint EventObjectCreate = 0x8000, EventObjectDestroy = 0x8001, EventObjectShow = 0x8002;
+    const uint WmGetIcon = 0x7F, WmSetIcon = 0x80, AbortIfHung = 2;
 
-    static string logPath, profileId, appId, displayName, relaunchCommand, iconResource;
-    static string launchExe, appKind, exeBaseName, extraArgs, dataDir;
+    static string logPath, profileId, appId, displayName, relaunchCommand, iconResource, iconFile;
+    static string launchExe, appKind, packageApp, exeBaseName, extraArgs, dataDir;
+    static readonly Dictionary<int, IntPtr> iconsBySize = new Dictionary<int, IntPtr>();
     static Regex dataDirArgument;
     static IntPtr mainProcess = IntPtr.Zero, hook = IntPtr.Zero;
     static int mainPid, tagged;
@@ -657,14 +736,18 @@ namespace TwinbarLauncher {
       dataDir = Text(record, "dataDir");
       appId = Text(record, "aumid");
       appKind = Text(record, "appKind");
+      packageApp = Text(record, "packageApp");
       extraArgs = Text(record, "extraArgs");
       exeBaseName = Path.GetFileNameWithoutExtension(Text(record, "realExe"));
       displayName = Text(record, "appName") + " " + Text(record, "name");
-      string icon = Text(record, "icon");
-      iconResource = (icon.Length > 0 ? icon : launchExe) + ",0";
+      iconFile = Text(record, "icon");
+      iconResource = (iconFile.Length > 0 ? iconFile : launchExe) + ",0";
       relaunchCommand = "\"" + Assembly.GetExecutingAssembly().Location + "\" " + profileId;
       dataDirArgument = new Regex("--user-data-dir=\"?" + Regex.Escape(dataDir) + "\"?(?=\\s|$)", RegexOptions.IgnoreCase);
-      if (!File.Exists(launchExe)) throw new FileNotFoundException(displayName + ": the app isn't at " + launchExe + " any more.");
+      // A Store app's folder changes with every update; Windows finds it by its package.
+      if (appKind != "store" && !File.Exists(launchExe)) {
+        throw new FileNotFoundException(displayName + ": the app isn't at " + launchExe + " any more. Run: twinbar rebuild " + profileId + " -App <new place>");
+      }
 
       bool first;
       using (Mutex watcher = new Mutex(true, "Local\\" + appId, out first)) {
@@ -690,7 +773,17 @@ namespace TwinbarLauncher {
     }
 
     static void StartApp() {
-      ProcessStartInfo info = new ProcessStartInfo(launchExe, ("--user-data-dir=\"" + dataDir + "\" " + extraArgs).Trim());
+      string arguments = ("--user-data-dir=\"" + dataDir + "\" " + extraArgs).Trim();
+      if (appKind == "store") {
+        IApplicationActivationManager manager = (IApplicationActivationManager)new ApplicationActivationManager();
+        uint pid;
+        int hr = manager.ActivateApplication(packageApp, arguments, 0, out pid);
+        if (hr != 0) {
+          throw new InvalidOperationException(displayName + ": Windows couldn't start " + packageApp + " (0x" + hr.ToString("X8") + "). Is the app still installed?");
+        }
+        return;
+      }
+      ProcessStartInfo info = new ProcessStartInfo(launchExe, arguments);
       info.UseShellExecute = false;
       info.WorkingDirectory = Path.GetDirectoryName(launchExe);
       using (Process.Start(info)) { }
@@ -743,7 +836,10 @@ namespace TwinbarLauncher {
       EnumWindows(delegate (IntPtr hwnd, IntPtr lParam) {
         int pid;
         GetWindowThreadProcessId(hwnd, out pid);
-        if (pid == mainPid) Tag(hwnd);
+        if (pid == mainPid) {
+          Tag(hwnd);
+          SetIcons(hwnd);
+        }
         return true;
       }, IntPtr.Zero);
     }
@@ -754,10 +850,38 @@ namespace TwinbarLauncher {
       try {
         int pid;
         GetWindowThreadProcessId(hwnd, out pid);
-        if (pid == mainPid) Tag(hwnd);
+        if (pid == mainPid) {
+          Tag(hwnd);
+          SetIcons(hwnd);
+        }
       } catch (Exception e) {
         Log(profileId + ": " + e.Message);
       }
+    }
+
+    static IntPtr IconOfSize(int size) {
+      IntPtr icon;
+      if (!iconsBySize.TryGetValue(size, out icon)) {
+        icon = LoadImageW(IntPtr.Zero, iconFile, 1, size, size, 0x10); // IMAGE_ICON, LR_LOADFROMFILE
+        iconsBySize[size] = icon;
+      }
+      return icon;
+    }
+
+    // The profile's icon for the window itself (title bar, Alt+Tab), at the window's
+    // DPI. These icons live as long as this launcher, which outlives the app.
+    static void SetIcons(IntPtr hwnd) {
+      if (iconFile.Length == 0 || !IsWindowVisible(hwnd)) return;
+      uint dpi = 96;
+      try { dpi = GetDpiForWindow(hwnd); } catch (EntryPointNotFoundException) { }
+      if (dpi == 0) dpi = 96;
+      IntPtr big = IconOfSize((int)(32 * dpi / 96)), small = IconOfSize((int)(16 * dpi / 96));
+      if (big == IntPtr.Zero || small == IntPtr.Zero) return;
+      IntPtr current;
+      if (SendMessageTimeoutW(hwnd, WmGetIcon, (IntPtr)1, IntPtr.Zero, AbortIfHung, 200, out current) == IntPtr.Zero) return;
+      if (current == big) return;
+      SendMessageTimeoutW(hwnd, WmSetIcon, (IntPtr)1, big, AbortIfHung, 200, out current);
+      SendMessageTimeoutW(hwnd, WmSetIcon, (IntPtr)0, small, AbortIfHung, 200, out current);
     }
 
     // Relaunch name, command and icon first, then the ID, which the taskbar acts on.
@@ -876,15 +1000,45 @@ function Initialize-Launcher {
   return $path
 }
 
-function New-ProfileIcon([string] $SourceExe, [string] $Id, [string] $StyleName, [string] $ColorHex, [string] $BadgeText) {
+function Get-IconsDir { Join-Path (Get-TwinbarHome) 'icons' }
+
+# Icon files are named after what's in them, so a changed look gets a new file
+# name and Windows can't show a stale copy from its icon cache.
+function Get-IconPath($Record) {
+  $look = '{0}|{1}|{2}|{3}|{4}' -f $Record.style, $Record.color, $Record.badge, $Record.launchExe, $script:TwinbarVersion
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($look)) } finally { $sha.Dispose() }
+  $hash = (($bytes[0..3] | ForEach-Object { $_.ToString('x2') }) -join '')
+  return (Join-Path (Get-IconsDir) "$($Record.id)-$hash.ico")
+}
+
+function New-ProfileIcon([string] $SourceExe, [string] $Path, [string] $StyleName, [string] $ColorHex, [string] $BadgeText) {
   Initialize-Interop
-  $dir = Join-Path (Get-TwinbarHome) 'icons'
-  [void][IO.Directory]::CreateDirectory($dir)
-  $path = Join-Path $dir "$Id.ico"
-  $tmp = "$path.$PID.tmp"
+  [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Path))
+  $tmp = "$Path.$PID.tmp"
   [TwinbarInterop.IconMaker]::Build($SourceExe, $tmp, $StyleName, $ColorHex, $BadgeText, '')
-  Move-Item -LiteralPath $tmp -Destination $path -Force
-  return $path
+  Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+# The taskbar's buttons, by the AppUserModelID each stands for; $null when there's
+# no taskbar to ask.
+function Get-TaskbarAppIds {
+  Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+  $a = [System.Windows.Automation.AutomationElement]
+  $condition = New-Object System.Windows.Automation.PropertyCondition($a::ClassNameProperty, 'Shell_TrayWnd')
+  $tray = $a::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
+  if ($null -eq $tray) { return $null }
+  $ids = @()
+  foreach ($e in $tray.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
+    if ($e.Current.AutomationId -like 'Appid:*') { $ids += $e.Current.AutomationId.Substring(6).Trim() }
+  }
+  return , $ids
+}
+
+# Launchers looking after a profile (their command line ends with the profile id).
+function Get-ProfileLaunchers([string] $Id) {
+  @(Get-CimInstance -ClassName Win32_Process -Filter "Name = '$($script:LauncherName)'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -match ('\s' + [regex]::Escape($Id) + '\s*$') })
 }
 
 # ---------------------------------------------------------------------------
@@ -973,9 +1127,92 @@ function Resolve-Style([string] $Value) {
   return $v
 }
 
+function Resolve-Appearance([string] $Value) {
+  if ([string]::IsNullOrWhiteSpace($Value)) { return 'system' }
+  $v = $Value.Trim().ToLowerInvariant()
+  if (-not $script:Appearances.Contains($v)) { Stop-Twinbar ('the appearance must be one of: {0}' -f ($script:Appearances.Keys -join ', ')) }
+  return $v
+}
+
+# Where Store apps' profiles keep their data: outside AppData, because Windows
+# redirects what a Store app writes under AppData into the app's own package
+# folder, where Twinbar couldn't see or remove it.
+function Get-StoreDataRoot {
+  if ($env:TWINBAR_STORE_DATA) { return $env:TWINBAR_STORE_DATA.TrimEnd('\') }
+  return (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Twinbar')
+}
+
+function Get-PinnedDir {
+  if ($env:TWINBAR_PINNED_DIR) { return $env:TWINBAR_PINNED_DIR }
+  return (Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar')
+}
+
+# The desktop apps in a Store package: exe, app id and execution aliases.
+function Get-StoreAppEntries($Package) {
+  $manifestPath = Join-Path $Package.InstallLocation 'AppxManifest.xml'
+  if (-not (Test-Path -LiteralPath $manifestPath)) { return }
+  try { $xml = [xml][IO.File]::ReadAllText($manifestPath) } catch { return }
+  foreach ($node in @($xml.SelectNodes("//*[local-name()='Applications']/*[local-name()='Application']"))) {
+    $exe = $node.GetAttribute('Executable')
+    if (-not $exe -or $exe -notmatch '\.exe$') { continue }
+    $aliases = @($node.SelectNodes(".//*[local-name()='ExecutionAlias']") | ForEach-Object { $_.GetAttribute('Alias') })
+    [pscustomobject]@{
+      Exe           = Join-Path $Package.InstallLocation $exe
+      AppId         = $node.GetAttribute('Id')
+      PackageFamily = $Package.PackageFamilyName
+      Aliases       = $aliases
+    }
+  }
+}
+
+# A Microsoft Store (MSIX) app, from its exe under WindowsApps, its app id
+# ("<package family>!<app>", optionally after "shell:AppsFolder\"), its
+# package name ("Claude"), or its app execution alias.
+function Resolve-StoreApp([string] $Value) {
+  $v = $Value.Trim().Trim('"')
+  if ($v -match '^shell:AppsFolder\\(.+)$') { $v = $Matches[1] }
+  $packages = @(Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { -not $_.IsFramework -and $_.InstallLocation })
+  if ($v -match '^([^\\/!:]+)!([^\\/!:]+)$') {
+    $family = $Matches[1]
+    $appPart = $Matches[2]
+    $entries = @($packages | Where-Object { $_.PackageFamilyName -ieq $family } | ForEach-Object { Get-StoreAppEntries $_ } | Where-Object { $_.AppId -ieq $appPart })
+  } elseif ($v -match '\\Microsoft\\WindowsApps\\([^\\]+\.exe)$') {
+    $alias = $Matches[1]
+    $entries = @($packages | ForEach-Object { Get-StoreAppEntries $_ } | Where-Object { $_.Aliases -contains $alias })
+  } elseif ($v -match '\\WindowsApps\\') {
+    $full = [IO.Path]::GetFullPath($v)
+    $owners = @($packages | Where-Object { $full.StartsWith($_.InstallLocation.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) })
+    $entries = @($owners | ForEach-Object { Get-StoreAppEntries $_ } | Where-Object { $_.Exe -ieq $full -or (Test-Path -LiteralPath $full -PathType Container) })
+  } else {
+    $entries = @($packages | Where-Object { $_.Name -ieq $v } | ForEach-Object { Get-StoreAppEntries $_ })
+  }
+  if (-not $entries.Count) { Stop-Twinbar "no Microsoft Store app found for '$Value'" }
+  $electron = @($entries | Where-Object { Test-ElectronDir (Split-Path -Parent $_.Exe) })
+  if (-not $electron.Count) { Stop-Twinbar "'$Value' is a Microsoft Store app, but not an Electron app" }
+  if ($electron.Count -gt 1) {
+    Stop-Twinbar ("'{0}' matches more than one app; give one of: {1}" -f $Value, (($electron | ForEach-Object { "$($_.PackageFamily)!$($_.AppId)" }) -join ', '))
+  }
+  $e = $electron[0]
+  $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($e.Exe)
+  $displayName = @($info.ProductName, $info.FileDescription, [IO.Path]::GetFileNameWithoutExtension($e.Exe)) |
+    Where-Object { $_ -and $_.Trim() } | Select-Object -First 1
+  [pscustomobject]@{
+    Name       = (($displayName -replace '[\\/:*?"<>|]', '').Trim())
+    Id         = Get-NameKey ([IO.Path]::GetFileNameWithoutExtension($e.Exe))
+    Kind       = 'store'
+    LaunchExe  = $e.Exe
+    RealExe    = $e.Exe
+    PackageApp = "$($e.PackageFamily)!$($e.AppId)"
+  }
+}
+
 # A record field that older profiles may not have.
 function Get-RecordValue($Record, [string] $Field) {
-  if ($Record.PSObject.Properties[$Field]) { return [string]$Record.$Field }
+  if ($Record -is [System.Collections.IDictionary]) {
+    if ($Record.Contains($Field) -and $null -ne $Record[$Field]) { return [string]$Record[$Field] }
+    return ''
+  }
+  if ($Record.PSObject.Properties[$Field] -and $null -ne $Record.$Field) { return [string]$Record.$Field }
   return ''
 }
 
@@ -1021,17 +1258,26 @@ function Find-AppExeInFolder([string] $Folder) {
   Stop-Twinbar ("found several programs in {0}; pass the .exe instead: {1}" -f $Folder, (($exes | ForEach-Object { $_.Name }) -join ', '))
 }
 
-# Works out how to start an Electron app from its .exe, install folder or shortcut.
-#   Kind      standard (one folder) or squirrel (Update.exe + app-<version> folders)
-#   LaunchExe what the profile's shortcut starts; for Squirrel the root launcher,
-#             which always starts the newest version and passes the arguments on
+# Works out how to start an Electron app from its .exe, install folder or shortcut,
+# or, for a Microsoft Store app, its package name or app id.
+#   Kind      standard (one folder), squirrel (Update.exe + app-<version> folders)
+#             or store (a Microsoft Store package; see Resolve-StoreApp)
+#   LaunchExe what is started; for Squirrel the root launcher, which always starts
+#             the newest version and passes the arguments on
 #   RealExe   the Electron executable that ends up running
 function Resolve-ElectronApp([string] $Path) {
   if ([string]::IsNullOrWhiteSpace($Path)) {
     Stop-Twinbar 'which app? Give -App: its .exe, its install folder or its Start menu shortcut'
   }
+  $raw = $Path.Trim().Trim('"')
+  if ($raw -match '^shell:AppsFolder\\' -or $raw -match '^[^\\/!:]+![^\\/!:]+$') { return (Resolve-StoreApp $raw) }
   $p = Resolve-FullPath $Path
-  if (-not (Test-Path -LiteralPath $p)) { Stop-Twinbar "not found: $p" }
+  if (-not (Test-Path -LiteralPath $p)) {
+    if ($raw -notmatch '[\\/]') {
+      try { return (Resolve-StoreApp $raw) } catch { Stop-Twinbar "not found: there's no file, folder or Microsoft Store app called '$raw'" }
+    }
+    Stop-Twinbar "not found: $p"
+  }
 
   $displayName = ''
   if ($p -match '\.lnk$') {
@@ -1053,9 +1299,7 @@ function Resolve-ElectronApp([string] $Path) {
   if ([IO.Path]::GetFileName($p) -ieq $script:LauncherName) {
     Stop-Twinbar 'that is a Twinbar profile; give the original app instead'
   }
-  if (Test-IsStoreAppPath $p) {
-    Stop-Twinbar 'Microsoft Store apps (installed under WindowsApps), such as Claude, are not supported yet'
-  }
+  if (Test-IsStoreAppPath $p) { return (Resolve-StoreApp $p) }
   if (Test-Path -LiteralPath $p -PathType Container) { $p = Find-AppExeInFolder $p }
   if ($p -notmatch '\.exe$') { Stop-Twinbar "not a program (.exe): $p" }
 
@@ -1102,6 +1346,7 @@ function Resolve-ElectronApp([string] $Path) {
     Kind      = $kind
     LaunchExe = $p
     RealExe   = $real
+    PackageApp = ''
   }
 }
 
@@ -1131,7 +1376,7 @@ function Test-ProtectedDir([string] $Dir) {
     [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('MyDocuments'),
     [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'),
     [Environment]::GetFolderPath('Windows'), $env:TEMP,
-    $twHome, (Join-Path $twHome 'data'), (Join-Path $twHome 'profiles')
+    $twHome, (Join-Path $twHome 'data'), (Join-Path $twHome 'profiles'), (Get-IconsDir), (Get-StoreDataRoot)
   )
   foreach ($x in $protected) {
     if ($x -and $d -ieq $x.TrimEnd('\')) { return $true }
@@ -1166,6 +1411,91 @@ function Write-Record($Record) {
   $tmp = "$path.tmp"
   [IO.File]::WriteAllText($tmp, ($Record | ConvertTo-Json -Depth 4), $script:Utf8NoBom)
   Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
+# A profile record (from its JSON file) as an ordered table with every field, filling
+# in what records from older versions don't have.
+function ConvertTo-ProfileTable($Record) {
+  $t = [ordered]@{}
+  foreach ($field in $script:RecordFields) { $t[$field] = Get-RecordValue $Record $field }
+  if (-not $t.appKind) { $t.appKind = 'standard' }
+  if (-not $t.style) { $t.style = 'tint+badge' }
+  if (-not $t.color) { $t.color = Resolve-ProfileColor '' $t.id }
+  if (-not $t.badge) { $t.badge = Get-BadgeText '' $t.name }
+  if (-not $t.appearance) { $t.appearance = 'system' }
+  if (-not $t.created) { $t.created = (Get-Date).ToString('o') }
+  return $t
+}
+
+# Points taskbar pins of a profile (Windows makes them from the window's relaunch
+# details) at its current launcher and icon. Returns how many it changed.
+function Update-PinnedShortcuts($Record, [string] $IconLocation) {
+  $dir = Get-PinnedDir
+  if (-not (Test-Path -LiteralPath $dir)) { return 0 }
+  $count = 0
+  foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -File -ErrorAction SilentlyContinue)) {
+    try { $link = Read-ShellLink $f.FullName } catch { continue }
+    if ($link.AppUserModelId -ne $Record.aumid) { continue }
+    [TwinbarInterop.Shell]::UpdateLink($f.FullName, $Record.launcher, $Record.id, $IconLocation, 0)
+    $count++
+  }
+  return $count
+}
+
+# Writes everything a profile is made of from its record: the launcher, the icon,
+# the Start menu shortcut, any taskbar pins, and the record itself. Used by new,
+# change and rebuild. Returns the number of taskbar pins it updated.
+function Publish-Profile([System.Collections.IDictionary] $Record) {
+  if (Test-Path -LiteralPath $Record.shortcut -PathType Leaf) {
+    $existing = Read-ShellLink $Record.shortcut
+    if ($existing.AppUserModelId -ne $Record.aumid) {
+      Stop-Twinbar "there's a shortcut at $($Record.shortcut) that Twinbar didn't make; move it away first"
+    }
+  }
+  $Record.launcher = Initialize-Launcher
+  $Record.extraArgs = $script:Appearances[$Record.appearance]
+  $oldIcon = $Record.icon
+  # Store apps move with every update, so even their original icon gets a copy.
+  if ($Record.style -ne 'original' -or $Record.appKind -eq 'store') {
+    $Record.icon = Get-IconPath $Record
+    if (-not (Test-Path -LiteralPath $Record.icon)) {
+      New-ProfileIcon $Record.launchExe $Record.icon $Record.style $Record.color $Record.badge
+    }
+  } else {
+    $Record.icon = ''
+  }
+  $iconLocation = if ($Record.icon) { $Record.icon } else { $Record.launchExe }
+  $workingDir = if ($Record.appKind -eq 'store') { Split-Path -Parent $Record.launcher } else { Split-Path -Parent $Record.launchExe }
+
+  [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Record.shortcut))
+  Save-ShellLink -Path $Record.shortcut -TargetPath $Record.launcher -Arguments $Record.id `
+    -WorkingDirectory $workingDir -IconPath $iconLocation -IconIndex 0 `
+    -Description "$($Record.appName) $($Record.name) (a Twinbar profile of $($Record.appName))" `
+    -AppUserModelId $Record.aumid
+  $pins = Update-PinnedShortcuts $Record $iconLocation
+  $Record.schema = 3
+  $Record.updated = (Get-Date).ToString('o')
+  $Record.twinbarVersion = $script:TwinbarVersion
+  Write-Record $Record
+
+  if ($oldIcon -and $oldIcon -ne $Record.icon -and
+    $oldIcon.StartsWith((Get-IconsDir) + '\', [StringComparison]::OrdinalIgnoreCase) -and
+    (Test-Path -LiteralPath $oldIcon)) {
+    Remove-Item -LiteralPath $oldIcon -Force -ErrorAction SilentlyContinue
+  }
+  [TwinbarInterop.Shell]::NotifyIconsChanged()
+  return $pins
+}
+
+function Get-LookNote($Record) {
+  $look = switch ($Record.style) {
+    'tint+badge' { "colour $($Record.color), badge $($Record.badge)" }
+    'tint' { "colour $($Record.color)" }
+    'badge' { "badge $($Record.badge) on $($Record.color)" }
+    default { "the app's own icon" }
+  }
+  if ($Record.appearance -and $Record.appearance -ne 'system') { $look += "; always $($Record.appearance)" }
+  return $look
 }
 
 function Find-Profile([string] $Which) {
@@ -1212,12 +1542,13 @@ function Get-ProfileStatus($Record) {
 function Invoke-New {
   param(
     [string] $AppPath, [string] $ProfileName, [string] $DataFolder, [switch] $Adopt, [string] $MenuDir,
-    [string] $ColorName, [string] $BadgeText, [string] $StyleName
+    [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName
   )
 
   $label = Test-ProfileName $ProfileName
   $look = Resolve-Style $StyleName
   $badgeValue = Get-BadgeText $BadgeText $label
+  $appearanceValue = Resolve-Appearance $AppearanceName
   $app = Resolve-ElectronApp $AppPath
   $key = Get-NameKey $label
   $id = "$($app.Id).$key"
@@ -1234,9 +1565,12 @@ function Invoke-New {
     Stop-Twinbar "there's already a shortcut called '$fullName.lnk' in $menu; remove or rename it first"
   }
 
-  $dataRoot = Join-Path (Join-Path (Get-TwinbarHome) 'data') $app.Id
+  $dataRoot = if ($app.Kind -eq 'store') { Join-Path (Get-StoreDataRoot) $app.Id } else { Join-Path (Join-Path (Get-TwinbarHome) 'data') $app.Id }
   $dd = if ($DataFolder) { Resolve-FullPath $DataFolder } else { Join-Path $dataRoot $key }
   $dd = $dd.TrimEnd('\')
+  if ($app.Kind -eq 'store' -and $dd.StartsWith([Environment]::GetFolderPath('UserProfile') + '\AppData\', [StringComparison]::OrdinalIgnoreCase)) {
+    Stop-Twinbar "a Store app's data can't go under AppData: Windows would redirect it into the app's package, out of Twinbar's reach. Pick a folder elsewhere"
+  }
   if ($dd.Contains('"')) { Stop-Twinbar 'the data folder path may not contain quotes' }
   if (Test-ProtectedDir $dd) { Stop-Twinbar "$dd can't be a profile's data folder; pick a folder of its own" }
   foreach ($exe in @($app.LaunchExe, $app.RealExe)) {
@@ -1265,9 +1599,24 @@ function Invoke-New {
   }
   if ($state -eq 'ours') { $dataNote = 'kept from before' }
 
-  # Twinbar's own files first: the launcher and the icon.
-  $launcher = Initialize-Launcher
-  $icon = if ($look -eq 'original') { '' } else { New-ProfileIcon $app.LaunchExe $id $look $colorHex $badgeValue }
+  $record = [ordered]@{}
+  foreach ($field in $script:RecordFields) { $record[$field] = '' }
+  $record.id = $id
+  $record.name = $label
+  $record.appName = $app.Name
+  $record.appId = $app.Id
+  $record.appKind = $app.Kind
+  $record.launchExe = $app.LaunchExe
+  $record.realExe = $app.RealExe
+  $record.packageApp = $app.PackageApp
+  $record.dataDir = $dd
+  $record.shortcut = $shortcut
+  $record.aumid = $aumid
+  $record.style = $look
+  $record.color = $colorHex
+  $record.badge = $badgeValue
+  $record.appearance = $appearanceValue
+  $record.created = (Get-Date).ToString('o')
 
   $createdDir = -not (Test-Path -LiteralPath $dd)
   $markerPath = Join-Path $dd $script:MarkerName
@@ -1275,35 +1624,11 @@ function Invoke-New {
   [void][IO.Directory]::CreateDirectory($dd)
   [IO.File]::WriteAllText($markerPath, $id, $script:Utf8NoBom)
   try {
-    [void][IO.Directory]::CreateDirectory($menu)
-    Save-ShellLink -Path $shortcut -TargetPath $launcher -Arguments $id `
-      -WorkingDirectory (Split-Path -Parent $app.LaunchExe) `
-      -IconPath $(if ($icon) { $icon } else { $app.LaunchExe }) -IconIndex 0 `
-      -Description "$fullName (a Twinbar profile of $($app.Name))" `
-      -AppUserModelId $aumid
-    Write-Record ([ordered]@{
-        schema         = 2
-        id             = $id
-        name           = $label
-        appName        = $app.Name
-        appId          = $app.Id
-        appKind        = $app.Kind
-        launchExe      = $app.LaunchExe
-        realExe        = $app.RealExe
-        dataDir        = $dd
-        shortcut       = $shortcut
-        aumid          = $aumid
-        launcher       = $launcher
-        style          = $look
-        color          = $colorHex
-        badge          = $badgeValue
-        icon           = $icon
-        created        = (Get-Date).ToString('o')
-        twinbarVersion = $script:TwinbarVersion
-      })
+    [void](Publish-Profile $record)
   } catch {
     if (Test-Path -LiteralPath $shortcut) { Remove-Item -LiteralPath $shortcut -Force }
-    if ($icon -and (Test-Path -LiteralPath $icon)) { Remove-Item -LiteralPath $icon -Force }
+    if ($record.icon -and (Test-Path -LiteralPath $record.icon)) { Remove-Item -LiteralPath $record.icon -Force }
+    if (Test-Path -LiteralPath (Get-RecordPath $id)) { Remove-Item -LiteralPath (Get-RecordPath $id) -Force }
     if ($createdDir) {
       Remove-Item -LiteralPath $dd -Recurse -Force
     } elseif ($null -ne $oldMarker) {
@@ -1314,17 +1639,156 @@ function Invoke-New {
     throw
   }
 
-  $lookNote = switch ($look) {
-    'tint+badge' { "colour $colorHex, badge $badgeValue" }
-    'tint' { "colour $colorHex" }
-    'badge' { "badge $badgeValue on $colorHex" }
-    default { "the app's own icon" }
-  }
   "Made ""$fullName""."
   "  Start menu:   $shortcut"
-  "  Icon:         $lookNote"
+  "  Icon:         $(Get-LookNote $record)"
   "  Sign-in data: $dd ($dataNote)"
   "Open it from the Start menu, or run: twinbar open ""$fullName"""
+}
+
+function Assert-NotRunning($Record) {
+  if (@(Get-ProfileProcesses $Record).Count) {
+    Stop-Twinbar "$($Record.appName) $($Record.name) is running; quit it first"
+  }
+}
+
+function Invoke-Change {
+  param([string] $Which, [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName)
+  if (-not ($ColorName -or $BadgeText -or $StyleName -or $AppearanceName)) {
+    Stop-Twinbar 'nothing to change; give -Color, -Badge, -Style or -Appearance'
+  }
+  $p = Find-Profile $Which
+  Assert-NotRunning $p
+  $record = ConvertTo-ProfileTable $p
+  if ($StyleName) { $record.style = Resolve-Style $StyleName }
+  if ($ColorName) { $record.color = Resolve-ProfileColor $ColorName $record.id }
+  if ($BadgeText) { $record.badge = Get-BadgeText $BadgeText $record.name }
+  if ($AppearanceName) { $record.appearance = Resolve-Appearance $AppearanceName }
+  $pins = Publish-Profile $record
+  "Changed ""$($record.appName) $($record.name)"": $(Get-LookNote $record)."
+  if ($pins) { "  Updated $pins taskbar pin(s)." }
+}
+
+# Makes a profile's files again from its record: after the app moved, was
+# reinstalled or updated, after a Twinbar update, or when something was deleted.
+function Invoke-Rebuild([string] $Which, [string] $AppPath, [switch] $Every) {
+  if ($Every -and $AppPath) { Stop-Twinbar '-App works for one profile at a time' }
+  if (-not $Every -and [string]::IsNullOrWhiteSpace($Which)) { Stop-Twinbar 'which profile? Give its name or id, or -All' }
+  $targets = @(if ($Every) { Get-AllProfiles } else { Find-Profile $Which })
+  if (-not $targets.Count) { return 'No profiles to rebuild.' }
+  $failed = @()
+  foreach ($p in $targets) {
+    $fullName = '{0} {1}' -f $p.appName, $p.name
+    try {
+      Assert-NotRunning $p
+      $record = ConvertTo-ProfileTable $p
+      $source = if ($AppPath) { $AppPath } elseif ($record.appKind -eq 'store' -and $record.packageApp) { $record.packageApp } else { $record.launchExe }
+      try {
+        $app = Resolve-ElectronApp $source
+      } catch {
+        Stop-Twinbar "$($_.Exception.Message). If the app moved, run: twinbar rebuild $($record.id) -App <its new place>"
+      }
+      if ($record.appId -and $app.Id -ne $record.appId) {
+        Stop-Twinbar "that's another app ($($app.Name)); a profile can only move to another copy of $($record.appName)"
+      }
+      $record.appId = $app.Id
+      $record.appKind = $app.Kind
+      $record.launchExe = $app.LaunchExe
+      $record.realExe = $app.RealExe
+      $record.packageApp = $app.PackageApp
+      $pins = Publish-Profile $record
+      "Rebuilt ""$fullName"" ($($app.Kind): $($app.RealExe))$(if ($pins) { "; updated $pins taskbar pin(s)" })."
+    } catch {
+      if (-not $Every) { throw }
+      $failed += $fullName
+      Write-Warning "$($fullName): $($_.Exception.Message)"
+    }
+  }
+  if ($failed.Count) { Stop-Twinbar "couldn't rebuild: $($failed -join ', ')" }
+}
+
+# Checks Twinbar and its profiles, and says what to do about anything wrong.
+function Invoke-Doctor([string] $Which) {
+  $script:doctorProblems = 0
+  $ok = { param($text) "  ok    $text" }
+  $note = { param($text) "  note  $text" }
+  $warn = { param($text) $script:doctorProblems++; "  warn  $text" }
+
+  "Twinbar $($script:TwinbarVersion); Windows PowerShell $($PSVersionTable.PSVersion); Windows $([Environment]::OSVersion.Version)"
+  "Home: $(Get-TwinbarHome)"
+  $launcherPath = Get-LauncherPath
+  if (-not (Test-Path -LiteralPath $launcherPath)) {
+    & $note "launcher: not built yet (it's built with the first profile)"
+  } else {
+    $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($launcherPath).FileVersion
+    if ($version -eq "$($script:TwinbarVersion).0") { & $ok "launcher: $launcherPath ($version)" }
+    else { & $warn "launcher: $version is from another Twinbar version; run: twinbar rebuild -All" }
+  }
+
+  $profiles = @(if ($Which) { Find-Profile $Which } else { Get-AllProfiles })
+  if (-not $profiles.Count) { 'No profiles yet.' }
+  $logPath = Join-Path (Get-TwinbarHome) 'logs\launcher.log'
+  $logLines = @(if (Test-Path -LiteralPath $logPath) { Get-Content -LiteralPath $logPath -Tail 400 })
+  $taskbar = $null
+  $taskbarAsked = $false
+
+  foreach ($p in $profiles) {
+    $r = ConvertTo-ProfileTable $p
+    ''
+    "$($r.appName) $($r.name) ($($r.id))"
+    if ([int](Get-RecordValue $p 'schema') -lt 3) {
+      & $warn "made with an older Twinbar ($(Get-RecordValue $p 'twinbarVersion')); run: twinbar rebuild $($r.id)"
+    }
+    $source = if ($r.appKind -eq 'store' -and $r.packageApp) { $r.packageApp } else { $r.launchExe }
+    try {
+      $app = Resolve-ElectronApp $source
+      & $ok "app: $($app.Name), $($app.Kind), $($app.RealExe)"
+      if ($r.realExe -and $app.RealExe -ne $r.realExe) { & $note "the app was updated since the profile was made; that's fine" }
+    } catch {
+      & $warn "app: $($_.Exception.Message). If it moved, run: twinbar rebuild $($r.id) -App <its new place>"
+    }
+    if (-not (Test-Path -LiteralPath $r.shortcut -PathType Leaf)) {
+      & $warn "shortcut: $($r.shortcut) is missing; run: twinbar rebuild $($r.id)"
+    } else {
+      $link = Read-ShellLink $r.shortcut
+      if ($link.AppUserModelId -ne $r.aumid) {
+        & $warn "shortcut: $($r.shortcut) isn't the one Twinbar made"
+      } elseif ($link.TargetPath -ine $launcherPath -or $link.Arguments -ne $r.id) {
+        & $warn "shortcut: doesn't start this profile through the launcher; run: twinbar rebuild $($r.id)"
+      } else {
+        & $ok "shortcut: $($r.shortcut)"
+      }
+    }
+    if ($r.icon) {
+      if (Test-Path -LiteralPath $r.icon) { & $ok "icon: $(Get-LookNote $r)" }
+      else { & $warn "icon: $($r.icon) is missing; run: twinbar rebuild $($r.id)" }
+    }
+    switch -Wildcard (Get-DataDirState $r.dataDir $r.id) {
+      'ours' { & $ok "data: $($r.dataDir)" }
+      'missing' { & $note "data: $($r.dataDir) isn't there; the app starts signed out and makes it again" }
+      'other:*' { & $warn "data: $($r.dataDir) belongs to another profile" }
+      default { & $warn "data: $($r.dataDir) has lost its Twinbar marker" }
+    }
+    if ($r.appKind -eq 'store' -and $r.dataDir.StartsWith([Environment]::GetFolderPath('ApplicationData'), [StringComparison]::OrdinalIgnoreCase)) {
+      & $warn "data: a Store app's data under AppData is redirected by Windows into the app's package; Twinbar can't remove it there"
+    }
+    if (@(Get-ProfileProcesses $p).Count) {
+      if (@(Get-ProfileLaunchers $r.id).Count) { & $ok 'running, looked after by the launcher' }
+      else { & $warn "running without the launcher, so it may share the app's taskbar button; quit it and open it from the Start menu" }
+      if (-not $taskbarAsked) { $taskbar = Get-TaskbarAppIds; $taskbarAsked = $true }
+      if ($null -ne $taskbar) {
+        if ($taskbar -contains $r.aumid) { & $ok 'taskbar: a button of its own' }
+        else { & $warn "taskbar: no button of its own yet (look in $logPath)" }
+      }
+    } else {
+      & $note 'not running'
+    }
+    $mine = @($logLines | Where-Object { $_ -match ('  ' + [regex]::Escape($r.id) + ':') } | Select-Object -Last 3)
+    foreach ($line in $mine) { "        log: $line" }
+  }
+  ''
+  if ($script:doctorProblems) { Stop-Twinbar "$($script:doctorProblems) problem(s) found" }
+  'No problems found.'
 }
 
 function Invoke-List([switch] $AsJson) {
@@ -1343,6 +1807,7 @@ function Invoke-List([switch] $AsJson) {
         color    = Get-RecordValue $_ 'color'
         badge    = Get-RecordValue $_ 'badge'
         icon     = Get-RecordValue $_ 'icon'
+        appearance = Get-RecordValue $_ 'appearance'
       }
     })
   if ($AsJson) {
@@ -1370,7 +1835,7 @@ function Invoke-Open([string] $Which) {
     Start-Process -FilePath $launcher -ArgumentList $p.id
   } else {
     Write-Warning "the Start menu shortcut is missing ($($p.shortcut)); starting the app directly"
-    Start-Process -FilePath $p.launchExe -ArgumentList ('--user-data-dir="' + $p.dataDir + '"')
+    Start-Process -FilePath $p.launchExe -ArgumentList ('--user-data-dir="' + $p.dataDir + '" ' + (Get-RecordValue $p 'extraArgs')).Trim()
   }
   "Opening $($p.appName) $($p.name)."
 }
@@ -1416,16 +1881,26 @@ function Show-Help {
   @"
 Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Electron app.
 
-  twinbar new -App PATH -Name NAME [-Color C] [-Badge B] [-Style S]
+  twinbar new -App APP -Name NAME [-Color C] [-Badge B] [-Style S] [-Appearance A]
               [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
-      Make a profile. PATH is the app's .exe, install folder or Start menu
-      shortcut. Adds "<App> <Name>" to the Start menu; the app then keeps that
-      profile's sign-in, settings and data in a folder of its own, and gets a
-      taskbar button and icon of its own.
-        -Color  $($script:Palette.Keys -join ', ') or #RRGGBB
-                (default: picked from the name)
-        -Badge  1 or 2 letters or digits (default: the name's first letter)
-        -Style  tint+badge (default), tint, badge, or original (the app's icon)
+      Make a profile. APP is the app's .exe, install folder or Start menu
+      shortcut, or a Microsoft Store app's name ("Claude"). Adds "<App> <Name>"
+      to the Start menu; the app then keeps that profile's sign-in, settings
+      and data in a folder of its own, with a taskbar button and icon of its own.
+        -Color       $($script:Palette.Keys -join ', ') or #RRGGBB
+                     (default: picked from the name)
+        -Badge       1 or 2 letters or digits (default: the name's first letter)
+        -Style       tint+badge (default), tint, badge, or original (the app's icon)
+        -Appearance  system (default), light or dark, for apps that follow Windows
+  twinbar change PROFILE [-Color C] [-Badge B] [-Style S] [-Appearance A]
+      Change a profile's icon or appearance. Its name and data stay.
+  twinbar rebuild PROFILE [-App APP]
+  twinbar rebuild -All
+      Make a profile's shortcut, icon and launcher again: after the app moved
+      (give its new place with -App), after a Twinbar update, or if something
+      was deleted.
+  twinbar doctor [PROFILE]
+      Check Twinbar and the profiles, and say how to fix what's wrong.
   twinbar list [-Json]
       Show the profiles.
   twinbar open PROFILE
@@ -1446,8 +1921,11 @@ function Invoke-Twinbar {
     'new' {
       $profileName = if ($Name) { $Name } else { $Target }
       Invoke-New -AppPath $App -ProfileName $profileName -DataFolder $DataDir -Adopt:$AdoptDataDir -MenuDir $ShortcutDir `
-        -ColorName $Color -BadgeText $Badge -StyleName $Style
+        -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance
     }
+    'change' { Invoke-Change -Which $Target -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance }
+    'rebuild' { Invoke-Rebuild -Which $Target -AppPath $App -Every:$All }
+    'doctor' { Invoke-Doctor $Target }
     'list' { Invoke-List -AsJson:$Json }
     'open' { Invoke-Open $Target }
     'remove' { Invoke-Remove $Target -WithData:$DeleteData }

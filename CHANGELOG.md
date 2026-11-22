@@ -6,6 +6,36 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-22
+
+Phase 3: change and repair profiles, light/dark, Microsoft Store apps.
+
+### Added
+
+- `twinbar change PROFILE`: a new colour, badge, style or appearance. The name
+  and data stay. Taskbar pins of the profile get the new icon too.
+- `twinbar rebuild PROFILE [-App APP]` and `twinbar rebuild -All`: make the
+  shortcut, icon and launcher again, after the app moved (`-App` with its new
+  place), after an app or Twinbar update, or if something was deleted. Brings
+  profiles made with 0.1.0 and 0.2.0 up to date.
+- `twinbar doctor [PROFILE]`: checks Twinbar and the profiles (app, shortcut,
+  icon, data, launcher, taskbar button, recent log lines) and says how to fix
+  what's wrong.
+- `-Appearance system|light|dark` for `new` and `change`, for apps that follow
+  Windows' light or dark setting (`--blink-settings=preferredColorScheme=1`
+  and `--force-dark-mode`).
+- Microsoft Store (MSIX) Electron apps, such as Claude: `-App Claude` (the
+  package name), the app id, the exe under WindowsApps, or its execution alias.
+  They're started through Windows' package activation, and their data is kept
+  in `%USERPROFILE%\Twinbar`, outside AppData, where Windows would otherwise
+  redirect it into the app's package.
+- The app's own window (title bar, Alt+Tab) shows the profile's icon too.
+
+### Changed
+
+- Icon files are named after their look (`<id>-<hash>.ico`), so Windows never
+  shows a stale icon from its cache after a change.
+
 ## [0.2.0] - 2026-11-22
 
 Phase 2: own icon and own taskbar button.
