@@ -14,7 +14,8 @@ Twinbar: a second, separately signed-in copy of an Electron app on Windows.
   twinbar open PROFILE
   twinbar remove PROFILE [-DeleteData]
   twinbar apps [-Json]
-  twinbar gui
+  twinbar gui [-Tray]
+  twinbar settings [NAME on|off]
   twinbar install [-Dir DIR] [-AddToPath] [-ShortcutDir DIR]
   twinbar uninstall
   twinbar update [-Check]
@@ -32,6 +33,7 @@ https://github.com/sadrazkh/twinbar (MIT licence)
 param(
   [Parameter(Position = 0)] [string] $Command = 'help',
   [Parameter(Position = 1)] [string] $Target,
+  [Parameter(Position = 2)] [string] $Value,
   [string] $App,
   [string] $Name,
   [string] $Color,
@@ -47,13 +49,14 @@ param(
   [string] $Dir,
   [switch] $AddToPath,
   [switch] $Check,
+  [switch] $Tray,
   [switch] $Json
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.7.0'
+$script:TwinbarVersion = '0.8.0'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
@@ -312,6 +315,87 @@ namespace TwinbarInterop {
       } finally {
         Marshal.ReleaseComObject(store);
       }
+    }
+  }
+
+  [ComImport, Guid("92CA9DCD-5622-4BBA-A805-5E9F541BD8C9"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IObjectArray {
+    void GetCount(out uint count);
+    void GetAt(uint index, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object item);
+  }
+
+  [ComImport, Guid("5632B1A4-E38A-400A-928A-D4CD63230295"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IObjectCollection {
+    void GetCount(out uint count);
+    void GetAt(uint index, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object item);
+    void AddObject([MarshalAs(UnmanagedType.Interface)] object item);
+    void AddFromArray([MarshalAs(UnmanagedType.Interface)] IObjectArray source);
+    void RemoveObjectAt(uint index);
+    void Clear();
+  }
+
+  [ComImport, Guid("2D3468C1-36A7-43B6-AC24-D3F02FD9607A")]
+  public class EnumerableObjectCollection { }
+
+  [ComImport, Guid("6332DEBF-87B5-4670-90C0-5E57B408A49E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface ICustomDestinationList {
+    void SetAppID([MarshalAs(UnmanagedType.LPWStr)] string appId);
+    void BeginList(out uint minSlots, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object removed);
+    void AppendCategory([MarshalAs(UnmanagedType.LPWStr)] string category, [MarshalAs(UnmanagedType.Interface)] IObjectArray items);
+    void AppendKnownCategory(int category);
+    void AddUserTasks([MarshalAs(UnmanagedType.Interface)] IObjectArray tasks);
+    void CommitList();
+    void GetRemovedDestinations(ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object removed);
+    void DeleteList([MarshalAs(UnmanagedType.LPWStr)] string appId);
+    void AbortList();
+  }
+
+  [ComImport, Guid("77F10CF0-3DB5-4966-B520-B7C54FD35ED6")]
+  public class DestinationList { }
+
+  // Twinbar's jump list (right-click its taskbar button or its Start menu entry):
+  // a task per profile, which starts it.
+  public static class JumpList {
+    static readonly Guid TitleFormat = new Guid("F29F85E0-4FF9-1068-AB91-08002B27B3D9");
+
+    public static void SetTasks(string appId, string[] titles, string[] paths, string[] arguments, string[] icons, string[] descriptions) {
+      ICustomDestinationList list = (ICustomDestinationList)new DestinationList();
+      try {
+        list.SetAppID(appId);
+        uint slots;
+        object removed;
+        Guid arrayId = typeof(IObjectArray).GUID;
+        list.BeginList(out slots, ref arrayId, out removed);
+        IObjectCollection tasks = (IObjectCollection)new EnumerableObjectCollection();
+        for (int i = 0; i < titles.Length; i++) {
+          IShellLinkW link = (IShellLinkW)new ShellLinkObject();
+          link.SetPath(paths[i]);
+          link.SetArguments(arguments[i]);
+          if (!String.IsNullOrEmpty(icons[i])) link.SetIconLocation(icons[i], 0);
+          if (!String.IsNullOrEmpty(descriptions[i])) link.SetDescription(descriptions[i]);
+          IPropertyStore store = (IPropertyStore)link;
+          PropertyKey key = new PropertyKey(TitleFormat, 2); // PKEY_Title: the text the jump list shows
+          PropVariant value = new PropVariant();
+          value.VarType = 31; // VT_LPWSTR
+          value.Pointer = Marshal.StringToCoTaskMemUni(titles[i]);
+          try {
+            Marshal.ThrowExceptionForHR(store.SetValue(ref key, ref value));
+            Marshal.ThrowExceptionForHR(store.Commit());
+          } finally {
+            Marshal.FreeCoTaskMem(value.Pointer);
+          }
+          tasks.AddObject(link);
+        }
+        list.AddUserTasks((IObjectArray)tasks);
+        list.CommitList();
+      } finally {
+        Marshal.ReleaseComObject(list);
+      }
+    }
+
+    public static void Delete(string appId) {
+      ICustomDestinationList list = (ICustomDestinationList)new DestinationList();
+      try { list.DeleteList(appId); } finally { Marshal.ReleaseComObject(list); }
     }
   }
 
@@ -1330,16 +1414,34 @@ namespace TwinbarApp {
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int MessageBoxW(IntPtr hwnd, string text, string caption, uint type);
+    [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(int processId);
 
+    // Tells the running Twinbar to show its window or to quit; false if none listens.
+    static bool Signal(string name) {
+      AllowSetForegroundWindow(-1); // ASFW_ANY: it may bring its window to the front
+      try {
+        using (EventWaitHandle signal = EventWaitHandle.OpenExisting(name)) signal.Set();
+        return true;
+      } catch (WaitHandleCannotBeOpenedException) {
+        return false;
+      }
+    }
+
+    // Twinbar.exe             the window (or, if Twinbar runs already, show that one)
+    // Twinbar.exe --tray      just the icon in the notification area (at sign-in)
+    // Twinbar.exe --quit      ends a running Twinbar
     [STAThread]
     public static int Main(string[] args) {
       SetCurrentProcessExplicitAppUserModelID("Twinbar.App");
       SetProcessDPIAware();
+      bool tray = Array.IndexOf(args, "--tray") >= 0, quit = Array.IndexOf(args, "--quit") >= 0;
       try {
         bool first;
         using (Mutex single = new Mutex(true, "Local\\Twinbar.App", out first)) {
           if (!first) {
-            // Already open: bring that window forward instead.
+            if (quit) { Signal("Local\\Twinbar.App.Quit"); return 0; }
+            if (tray || Signal("Local\\Twinbar.App.Show")) return 0;
+            // A Twinbar from before 0.8.0 doesn't listen: bring its window forward.
             Process me = Process.GetCurrentProcess();
             foreach (Process p in Process.GetProcessesByName(me.ProcessName)) {
               if (p.Id != me.Id && p.MainWindowHandle != IntPtr.Zero) {
@@ -1349,6 +1451,7 @@ namespace TwinbarApp {
             }
             return 0;
           }
+          if (quit) return 0;
           string script = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "twinbar.ps1");
           if (!File.Exists(script)) throw new FileNotFoundException("twinbar.ps1 should be next to Twinbar.exe, in " + AppDomain.CurrentDomain.BaseDirectory);
           InitialSessionState state = InitialSessionState.CreateDefault();
@@ -1360,6 +1463,7 @@ namespace TwinbarApp {
             using (PowerShell shell = PowerShell.Create()) {
               shell.Runspace = runspace;
               shell.AddCommand(script).AddArgument("gui");
+              if (tray) shell.AddParameter("Tray");
               shell.Invoke();
               if (shell.Streams.Error.Count > 0) throw new InvalidOperationException(shell.Streams.Error[0].ToString());
             }
@@ -1566,6 +1670,9 @@ function Invoke-Uninstall([string] $Folder) {
     $updated = Remove-PathEntry $current $target
     if ($updated -ne $current) { Set-UserPath $updated }
   }
+  # Starting with Windows, and the jump list, go with the installed Twinbar.
+  if ((Get-StartupEntry) -like ('"{0}"*' -f (Join-Path $target 'Twinbar.exe'))) { Remove-ItemProperty -Path (Get-RunKeyPath) -Name 'Twinbar' }
+  try { Initialize-Interop; [TwinbarInterop.JumpList]::Delete((Get-JumpListAppId)) } catch { Write-Verbose "no jump list to remove: $($_.Exception.Message)" }
   foreach ($file in $script:InstalledFiles) {
     $path = Join-Path $target $file
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
@@ -1591,7 +1698,7 @@ $script:Repository = 'sadrazkh/twinbar'
 
 function Get-SettingsPath { Join-Path (Get-TwinbarHome) 'settings.json' }
 
-$script:DefaultSettings = [ordered]@{ checkForUpdates = $true; lastUpdateCheck = ''; notifiedVersion = '' }
+$script:DefaultSettings = [ordered]@{ checkForUpdates = $true; lastUpdateCheck = ''; notifiedVersion = ''; closeToTray = $true; trayHintShown = $false }
 
 # Twinbar's own settings (not a profile's), with defaults for what isn't set.
 function Get-Settings {
@@ -1808,6 +1915,100 @@ function Invoke-Update([switch] $CheckOnly) {
   } else {
     Start-Process -FilePath $setup -ArgumentList (Get-SetupArguments $kind)
     "Opened the installer: it installs Twinbar $($release.Version) for you, in $(Get-DefaultInstallDir) unless you pick another folder."
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Starting with Windows, Twinbar's jump list, and its settings
+# ---------------------------------------------------------------------------
+
+function Get-RunKeyPath {
+  if ($env:TWINBAR_RUN_KEY) { return $env:TWINBAR_RUN_KEY }
+  return 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+}
+
+function Get-AppExePath { Join-Path (Split-Path -Parent $script:SelfPath) 'Twinbar.exe' }
+
+# What Windows runs when you sign in: Twinbar.exe, just its icon by the clock.
+function Get-StartupCommand { '"{0}" --tray' -f (Get-AppExePath) }
+
+function Get-StartupEntry {
+  $entry = Get-ItemProperty -Path (Get-RunKeyPath) -Name 'Twinbar' -ErrorAction SilentlyContinue
+  if ($null -eq $entry) { return '' }
+  return [string]$entry.Twinbar
+}
+
+function Test-StartWithWindows { return ((Get-StartupEntry) -eq (Get-StartupCommand)) }
+
+function Set-StartWithWindows([bool] $On) {
+  $key = Get-RunKeyPath
+  if ($On) {
+    if (-not (Test-Path -LiteralPath (Get-AppExePath))) {
+      Stop-Twinbar 'starting with Windows needs an installed Twinbar (its installer, or twinbar install)'
+    }
+    if (-not (Test-Path -Path $key)) { [void](New-Item -Path $key -Force) }
+    Set-ItemProperty -Path $key -Name 'Twinbar' -Value (Get-StartupCommand)
+  } elseif (Get-StartupEntry) {
+    Remove-ItemProperty -Path $key -Name 'Twinbar'
+  }
+}
+
+function Get-JumpListAppId {
+  if ($env:TWINBAR_JUMPLIST_ID) { return $env:TWINBAR_JUMPLIST_ID }
+  return $script:AppId
+}
+
+# Twinbar's jump list (right-click its taskbar button or its Start menu entry): one
+# entry per profile, which opens it. The window keeps it up to date, and so do
+# the commands that change profiles once Twinbar is installed.
+function Update-JumpList {
+  if (-not $script:Gui -and -not (Test-Path -LiteralPath (Get-InstallInfoPath))) { return }
+  try {
+    Initialize-Interop
+    $rows = @(Get-AllProfiles | ForEach-Object { ConvertTo-ProfileTable $_ } | Where-Object { $_.launcher -and (Test-Path -LiteralPath $_.launcher) })
+    # An empty list isn't saved; with no profiles, the list goes.
+    if (-not $rows.Count) { [TwinbarInterop.JumpList]::Delete((Get-JumpListAppId)); return }
+    [TwinbarInterop.JumpList]::SetTasks((Get-JumpListAppId),
+      [string[]]@($rows | ForEach-Object { '{0} {1}' -f $_.appName, $_.name }),
+      [string[]]@($rows | ForEach-Object { $_.launcher }),
+      [string[]]@($rows | ForEach-Object { $_.id }),
+      [string[]]@($rows | ForEach-Object { if ($_.icon) { $_.icon } else { $_.launchExe } }),
+      [string[]]@($rows | ForEach-Object { "Open $($_.appName) $($_.name)" }))
+  } catch {
+    Write-Verbose "couldn't update the jump list: $($_.Exception.Message)"
+  }
+}
+
+# twinbar settings [NAME on|off]
+$script:SettingNames = [ordered]@{
+  updates = 'Check for updates once a day while Twinbar runs'
+  tray    = "Closing the window keeps Twinbar's icon by the clock"
+  startup = 'Start Twinbar (just its icon by the clock) when you sign in to Windows'
+}
+
+function Get-SettingState([string] $Name) {
+  $s = Get-Settings
+  switch ($Name) {
+    'updates' { return [bool]$s.checkForUpdates }
+    'tray' { return [bool]$s.closeToTray }
+    'startup' { return (Test-StartWithWindows) }
+  }
+}
+
+function Invoke-Settings([string] $Name, [string] $State) {
+  if ($Name) {
+    $n = $Name.Trim().ToLowerInvariant()
+    if (-not $script:SettingNames.Contains($n)) { Stop-Twinbar ('the settings are: {0}' -f ($script:SettingNames.Keys -join ', ')) }
+    $on = switch -Regex ($State.Trim().ToLowerInvariant()) { '^(on|yes|true|1)$' { $true } '^(off|no|false|0)$' { $false } default { $null } }
+    if ($null -eq $on) { Stop-Twinbar "say on or off: twinbar settings $n on" }
+    switch ($n) {
+      'updates' { Set-TwinbarSetting 'checkForUpdates' $on }
+      'tray' { Set-TwinbarSetting 'closeToTray' $on }
+      'startup' { Set-StartWithWindows $on }
+    }
+  }
+  foreach ($k in $script:SettingNames.Keys) {
+    '{0,-8} {1,-4} {2}' -f $k, $(if (Get-SettingState $k) { 'on' } else { 'off' }), $script:SettingNames[$k]
   }
 }
 
@@ -2299,6 +2500,7 @@ function Publish-Profile([System.Collections.IDictionary] $Record) {
     Remove-Item -LiteralPath $oldIcon -Force -ErrorAction SilentlyContinue
   }
   [TwinbarInterop.Shell]::NotifyIconsChanged()
+  Update-JumpList
   return $pins
 }
 
@@ -2885,6 +3087,7 @@ function Invoke-Remove([string] $Which, [switch] $WithData) {
     Remove-Item -LiteralPath $icon -Force
   }
   Remove-Item -LiteralPath (Get-RecordPath $p.id) -Force
+  Update-JumpList
   "Removed ""$fullName""."
   $report
 }
@@ -3109,7 +3312,7 @@ function New-MainForm {
   $timer = New-Object Windows.Forms.Timer
   $timer.Interval = 4000
   $timer.Add_Tick({
-      Update-ProfileList -Quiet
+      if ($script:Gui.Form.Visible) { Update-ProfileList -Quiet }
       if ((Get-Date) -ge $script:Gui.NextUpdateCheck) { Start-UpdateCheck }
     })
   $g.Timer = $timer
@@ -3117,19 +3320,160 @@ function New-MainForm {
   $workTimer.Interval = 250
   $workTimer.Add_Tick({ Update-GuiWork })
   $g.WorkTimer = $workTimer
+  foreach ($k in 'Started', 'Stopped', 'Quitting') { $g[$k] = $false }
+  foreach ($k in 'Tray', 'TrayMenu', 'Context', 'SignalTimer', 'ShowSignal', 'QuitSignal', 'BalloonAction') { $g[$k] = $null }
   $form.Add_Shown({
+      Start-GuiBackground
       Update-ProfileList
       if ($script:Gui.Rows.Count) { Set-GuiStatus ('{0} profile(s). Double-click one to open it.' -f $script:Gui.Rows.Count) }
-      $script:Gui.Timer.Start()
-      Start-UpdateCheck
     })
-  $form.Add_FormClosed({
+  # With the icon by the clock, closing the window hides it (unless that's turned off).
+  $form.Add_FormClosing({
+      param($window, $closing)
       $g = $script:Gui
-      $g.Timer.Stop(); $g.Timer.Dispose()
-      $g.WorkTimer.Stop(); $g.WorkTimer.Dispose()
-      if ($g.Work) { $g.Work.Client.CancelAsync(); $g.Work.Client.Dispose(); $g.Work = $null }
+      if ($g.Tray -and -not $g.Quitting -and $closing.CloseReason -eq 'UserClosing' -and (Get-Settings).closeToTray) {
+        $closing.Cancel = $true
+        $window.Hide()
+        if (-not (Get-Settings).trayHintShown) {
+          Set-TwinbarSetting 'trayHintShown' $true
+          $g.Tray.ShowBalloonTip(6000, 'Twinbar is still here', 'Click its icon for the window, or right-click it for your profiles. Quit is in that menu too.', 'Info')
+        }
+      }
     })
+  $form.Add_FormClosed({ Stop-GuiApp })
   return $form
+}
+
+# The timers and the first update check; once, when the window first shows or
+# when Twinbar starts by the clock.
+function Start-GuiBackground {
+  $g = $script:Gui
+  if ($g.Started) { return }
+  $g.Started = $true
+  $g.Timer.Start()
+  Start-UpdateCheck
+}
+
+function Stop-GuiApp {
+  $g = $script:Gui
+  if ($null -eq $g -or $g.Stopped) { return }
+  $g.Stopped = $true
+  $g.Timer.Stop(); $g.Timer.Dispose()
+  $g.WorkTimer.Stop(); $g.WorkTimer.Dispose()
+  if ($g.Work) { $g.Work.Client.CancelAsync(); $g.Work.Client.Dispose(); $g.Work = $null }
+  if ($g.SignalTimer) { $g.SignalTimer.Stop(); $g.SignalTimer.Dispose() }
+  if ($g.Tray) { $g.Tray.Visible = $false; $g.Tray.Dispose() }
+  if ($g.Context) { $g.Context.ExitThread() }
+}
+
+function Show-MainWindow {
+  $f = $script:Gui.Form
+  if (-not $f.Visible) { $f.Show() }
+  if ($f.WindowState -eq 'Minimized') { $f.WindowState = 'Normal' }
+  $f.Activate()
+}
+
+# Quit: the window and the icon by the clock.
+function Exit-TwinbarWindow {
+  $g = $script:Gui
+  $g.Quitting = $true
+  if ($g.Form.IsHandleCreated) { $g.Form.Close() } else { Stop-GuiApp }
+}
+
+# Twinbar's own switches, as menu items (in More... and in the icon's menu).
+function Get-TwinbarSwitches {
+  $labels = [ordered]@{
+    startup = 'Start Twinbar when I sign in to Windows'
+    tray    = 'Keep Twinbar by the clock when its window closes'
+    updates = 'Check for updates automatically'
+  }
+  foreach ($name in $labels.Keys) {
+    $item = New-Object Windows.Forms.ToolStripMenuItem $labels[$name]
+    $item.Tag = $name
+    $item.Checked = [bool](Get-SettingState $name)
+    if ($name -eq 'startup' -and -not (Test-Path -LiteralPath (Get-AppExePath))) {
+      $item.Enabled = $false
+      $item.ToolTipText = 'Install Twinbar first'
+    }
+    $item.Add_Click({
+        param($item)
+        try {
+          [void](Invoke-Settings ([string]$item.Tag) $(if ($item.Checked) { 'off' } else { 'on' }))
+          $item.Checked = [bool](Get-SettingState ([string]$item.Tag))
+        } catch {
+          [void](Show-GuiMessage $script:Gui.Form (ConvertTo-Sentence $_.Exception.Message))
+        }
+      })
+    $item
+  }
+}
+
+# The icon's menu: Open Twinbar, the profiles (whether each runs, and whether its
+# proxy answers), an update if there is one, Twinbar's switches, and Quit.
+function Update-TrayMenu($Menu) {
+  $Menu.Items.Clear()
+  $open = New-Object Windows.Forms.ToolStripMenuItem 'Open Twinbar'
+  $open.Font = New-Object Drawing.Font($Menu.Font, [Drawing.FontStyle]::Bold)
+  $open.Add_Click({ Show-MainWindow })
+  [void]$Menu.Items.Add($open)
+  [void]$Menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+  $rows = @(Get-GuiRows)
+  $answers = @{}
+  foreach ($r in $rows) {
+    $item = New-Object Windows.Forms.ToolStripMenuItem $r.FullName
+    $item.Tag = $r.Id
+    $notes = @()
+    if ($r.Status -eq 'running') { $notes += 'running' }
+    if ($r.Record.proxy) {
+      if (-not $answers.Contains($r.Record.proxy)) {
+        $u = [Uri]$r.Record.proxy
+        $answers[$r.Record.proxy] = Test-TcpPort $u.Host.Trim('[', ']') $u.Port 500
+      }
+      $notes += $(if ($answers[$r.Record.proxy]) { 'proxy OK' } else { 'proxy down' })
+    }
+    $item.ShortcutKeyDisplayString = $notes -join ', '
+    $bitmap = Get-ProfileBitmap $r.Record (Get-Scaled 16)
+    if ($bitmap) { $item.Image = $bitmap }
+    $item.Add_Click({ param($item) $id = [string]$item.Tag; [void](Invoke-GuiAction { Invoke-Open $id }) })
+    [void]$Menu.Items.Add($item)
+  }
+  if (-not $rows.Count) {
+    $none = New-Object Windows.Forms.ToolStripMenuItem 'No profiles yet'
+    $none.Enabled = $false
+    [void]$Menu.Items.Add($none)
+  }
+  [void]$Menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+  if ($script:Gui.Update) {
+    $update = New-Object Windows.Forms.ToolStripMenuItem "Update to $($script:Gui.Update.Version)..."
+    $update.Add_Click({ Show-MainWindow; Show-UpdateDialog $script:Gui.Update })
+    [void]$Menu.Items.Add($update)
+  }
+  foreach ($toggle in @(Get-TwinbarSwitches)) { [void]$Menu.Items.Add($toggle) }
+  [void]$Menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+  $quit = New-Object Windows.Forms.ToolStripMenuItem 'Quit Twinbar'
+  $quit.Add_Click({ Exit-TwinbarWindow })
+  [void]$Menu.Items.Add($quit)
+}
+
+function Add-TrayIcon {
+  $g = $script:Gui
+  $tray = New-Object Windows.Forms.NotifyIcon
+  try {
+    $tray.Icon = New-Object Drawing.Icon((Get-AppIconPath), (Get-Scaled 16), (Get-Scaled 16))
+  } catch {
+    $tray.Icon = [Drawing.SystemIcons]::Application
+  }
+  $tray.Text = 'Twinbar'
+  $menu = New-Object Windows.Forms.ContextMenuStrip
+  $menu.Font = New-GuiFont
+  Update-TrayMenu $menu
+  $menu.Add_Opening({ param($menu, $opening) Update-TrayMenu $menu; $opening.Cancel = $false })
+  $tray.ContextMenuStrip = $menu
+  $tray.Add_MouseClick({ param($icon, $click) if ($click.Button -eq 'Left') { Show-MainWindow } })
+  $tray.Add_BalloonTipClicked({ if ($script:Gui.BalloonAction) { & $script:Gui.BalloonAction } })
+  $tray.Visible = $true
+  $g.Tray = $tray
+  $g.TrayMenu = $menu
 }
 
 # --- updates and other network work in the window ---
@@ -3225,10 +3569,16 @@ function Complete-UpdateCheck($Work) {
   $g.Version.IsLink = $true
   $g.Version.ToolTipText = "Twinbar $($release.Version) is out; click to see what's new and update"
   Set-GuiStatus "Twinbar $($release.Version) is out."
-  # Asked once per new version; after that, the link in the status bar stays.
+  # Asked once per new version; after that, the link in the status bar stays. With
+  # the window hidden, a note by the clock asks instead.
   if ($manual -or (Get-Settings).notifiedVersion -ne $release.Version) {
     Set-TwinbarSetting 'notifiedVersion' $release.Version
-    Show-UpdateDialog $release
+    if ($g.Tray -and -not $g.Form.Visible) {
+      $g.BalloonAction = { Show-MainWindow; Show-UpdateDialog $script:Gui.Update }
+      $g.Tray.ShowBalloonTip(10000, "Twinbar $($release.Version) is out", "Click here to see what's new and update.", 'Info')
+    } else {
+      Show-UpdateDialog $release
+    }
   }
 }
 
@@ -3346,7 +3696,7 @@ function Complete-UpdateDownload($Work) {
     return
   }
   Start-UpdateAfterExit $setup
-  $g.Form.Close()
+  Exit-TwinbarWindow
 }
 
 function Show-MoreMenu {
@@ -3355,10 +3705,8 @@ function Show-MoreMenu {
   $menu.Font = New-GuiFont
   $check = $menu.Items.Add('Check for updates')
   $check.Add_Click({ Start-UpdateCheck -Manual })
-  $auto = New-Object Windows.Forms.ToolStripMenuItem 'Check for updates automatically'
-  $auto.Checked = [bool](Get-Settings).checkForUpdates
-  $auto.Add_Click({ param($item) $item.Checked = -not $item.Checked; Set-TwinbarSetting 'checkForUpdates' $item.Checked })
-  [void]$menu.Items.Add($auto)
+  [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+  foreach ($toggle in @(Get-TwinbarSwitches)) { [void]$menu.Items.Add($toggle) }
   [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
   $proxies = $menu.Items.Add('Find proxies on this computer')
   $proxies.Add_Click({ Show-ProxiesFound })
@@ -3895,12 +4243,29 @@ function Show-ProfileDialog($Row) {
   }
 }
 
-function Show-TwinbarWindow {
+function Show-TwinbarWindow([switch] $InTray) {
   Initialize-Forms
   [Windows.Forms.Application]::EnableVisualStyles()
   try {
     $form = New-MainForm
-    [Windows.Forms.Application]::Run($form)
+    $g = $script:Gui
+    # Twinbar runs until Quit, or until its window closes while it's not kept by the clock.
+    $g.Context = New-Object Windows.Forms.ApplicationContext
+    Add-TrayIcon
+    # Another Twinbar.exe asks this one to show its window, or to quit.
+    $g.ShowSignal = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::AutoReset, 'Local\Twinbar.App.Show')
+    $g.QuitSignal = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::AutoReset, 'Local\Twinbar.App.Quit')
+    $signals = New-Object Windows.Forms.Timer
+    $signals.Interval = 300
+    $signals.Add_Tick({
+        $g = $script:Gui
+        if ($g.QuitSignal.WaitOne(0)) { Exit-TwinbarWindow } elseif ($g.ShowSignal.WaitOne(0)) { Show-MainWindow }
+      })
+    $g.SignalTimer = $signals
+    $signals.Start()
+    if ($InTray) { Start-GuiBackground } else { $form.Show() }
+    Update-JumpList
+    [Windows.Forms.Application]::Run($g.Context)
   } catch {
     [void](Show-GuiMessage $null ("Twinbar couldn't open its window: " + $_.Exception.Message) 'OK' 'Error')
     throw
@@ -3951,8 +4316,13 @@ Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Ele
       unless you add -DeleteData.
   twinbar apps [-Json]
       List the Electron apps found in the Start menu and the Microsoft Store.
-  twinbar gui
-      Open the Twinbar window.
+  twinbar gui [-Tray]
+      Open the Twinbar window, with its icon by the clock (right-click it for
+      your profiles). -Tray starts with just the icon.
+  twinbar settings [NAME on|off]
+      Show or change Twinbar's settings: updates (check once a day), tray
+      (closing the window keeps the icon by the clock) and startup (start
+      with Windows, by the clock).
   twinbar install [-Dir DIR] [-AddToPath] [-ShortcutDir DIR]
       Install Twinbar for you (no admin rights): the Twinbar window in the
       Start menu, in $(Get-DefaultInstallDir) unless -Dir says otherwise.
@@ -4012,7 +4382,8 @@ function Invoke-Twinbar {
     'rebuild' { Invoke-Rebuild -Which $Target -AppPath $App -Every:$All }
     'doctor' { Invoke-Doctor $Target }
     'apps' { Invoke-Apps -AsJson:$Json }
-    'gui' { Show-TwinbarWindow }
+    'gui' { Show-TwinbarWindow -InTray:$Tray }
+    'settings' { Invoke-Settings $Target $Value }
     'install' { Invoke-Install -Folder $Dir -MenuDir $ShortcutDir -OnPath:$AddToPath }
     'uninstall' { Invoke-Uninstall -Folder $Dir }
     'list' { Invoke-List -AsJson:$Json }

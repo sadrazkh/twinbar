@@ -33,6 +33,12 @@ $storeData = if ($root.StartsWith([Environment]::GetFolderPath('UserProfile') + 
 } else {
   Join-Path $root 'store data'
 }
+# Twinbar's jump list and "start with Windows" entry are per user, not per folder:
+# the tests use their own, so yours aren't touched.
+$testKey = (Split-Path -Leaf $root).Substring(13)
+$jumpListId = "Twinbar.Test.$testKey"
+$runKeyRoot = "HKCU:\Software\Twinbar tests\$testKey"
+$runKey = "$runKeyRoot\Run"
 $script:passed = 0
 $script:failed = 0
 $script:fakeBuilt = $null
@@ -101,6 +107,8 @@ function Invoke-Cli([string[]] $Arguments, [string] $Script = $cli) {
   $psi.EnvironmentVariables['TWINBAR_STORE_DATA'] = $storeData
   $psi.EnvironmentVariables['TWINBAR_SHORTCUT_DIR'] = $menu
   $psi.EnvironmentVariables['TWINBAR_START_MENU'] = $startMenu
+  $psi.EnvironmentVariables['TWINBAR_JUMPLIST_ID'] = $jumpListId
+  $psi.EnvironmentVariables['TWINBAR_RUN_KEY'] = $runKey
   foreach ($key in $script:extraEnv.Keys) { $psi.EnvironmentVariables[$key] = $script:extraEnv[$key] }
   $proc = [Diagnostics.Process]::Start($psi)
   $out = $proc.StandardOutput.ReadToEndAsync()
@@ -349,6 +357,8 @@ try {
   $env:TWINBAR_STORE_DATA = $storeData
   $env:TWINBAR_SHORTCUT_DIR = $menu
   $env:TWINBAR_START_MENU = $startMenu
+  $env:TWINBAR_JUMPLIST_ID = $jumpListId
+  $env:TWINBAR_RUN_KEY = $runKey
   . $cli
 
   Assert-Equal 'C:\a;C:\b;C:\c' (Add-PathEntry 'C:\a;C:\b' 'C:\c') 'PATH: an entry is added at the end'
@@ -500,6 +510,26 @@ try {
   Assert-Equal '/NORESTART' ((Get-SetupArguments 'copy') -join ' ') "update: the installer's window otherwise"
   Assert-Equal 'copy' (Get-InstallKind) 'update: the repository is a plain copy'
   Assert-True ((Get-Settings).checkForUpdates) 'settings: checking for updates is on by default'
+  Assert-True ((Get-Settings).closeToTray) 'settings: closing the window keeps Twinbar by the clock by default'
+  Assert-Equal "`"$(Join-Path $repo 'Twinbar.exe')`" --tray" (Get-StartupCommand) 'startup: Twinbar.exe, straight to the clock'
+  Assert-Throws { Set-StartWithWindows $true } 'needs an installed Twinbar' "startup: not from a copy that isn't installed"
+  Assert-True (-not (Test-StartWithWindows)) "startup: off until it's turned on"
+
+  # The jump list, under the tests' own ID. Windows keeps it in a file of its own;
+  # the title is in there as UTF-16, at an even or an odd byte.
+  $jumpDir = Join-Path $env:APPDATA 'Microsoft\Windows\Recent\CustomDestinations'
+  $findInJumpLists = {
+    param([string] $Text)
+    @(Get-ChildItem -LiteralPath $jumpDir -File -ErrorAction SilentlyContinue | Where-Object {
+        $bytes = [IO.File]::ReadAllBytes($_.FullName)
+        $bytes.Length -gt 1 -and ([Text.Encoding]::Unicode.GetString($bytes).Contains($Text) -or [Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1).Contains($Text))
+      }).Count -gt 0
+  }
+  $jumpTitle = "Fake App Jumpy $testKey"
+  [TwinbarInterop.JumpList]::SetTasks($jumpListId, @($jumpTitle), @($stdExe), @('fakeapp.jumpy'), @(''), @('Open it'))
+  Assert-True (& $findInJumpLists $jumpTitle) 'jump list: a profile is in it'
+  [TwinbarInterop.JumpList]::Delete($jumpListId)
+  Assert-True (-not (& $findInJumpLists $jumpTitle)) 'jump list: and gone when the list is deleted'
 
   $old = [pscustomobject]@{ schema = 1; id = 'fakeapp.old'; name = 'Old'; appName = 'Fake App'; launchExe = $stdExe; realExe = $stdExe; dataDir = 'x'; shortcut = 'y'; aumid = 'Twinbar.fakeapp.old' }
   $table = ConvertTo-ProfileTable $old
@@ -576,6 +606,15 @@ try {
   Assert-Cli (Invoke-Cli @('help')) 0 'twinbar new -App' 'help'
   Assert-Cli (Invoke-Cli @('version')) 0 ([regex]::Escape($version)) 'version'
   Assert-Cli (Invoke-Cli @('bogus')) 1 'unknown command' 'an unknown command fails'
+  $r = Invoke-Cli @('settings')
+  Assert-Cli $r 0 '(?m)^updates\s+on\b' 'settings: updates on by default'
+  Assert-Cli $r 0 '(?m)^tray\s+on\b' 'settings: tray on by default'
+  Assert-Cli $r 0 '(?m)^startup\s+off\b' 'settings: startup off by default'
+  Assert-Cli (Invoke-Cli @('settings', 'updates', 'off')) 0 '(?m)^updates\s+off\b' 'settings updates off'
+  Assert-Cli (Invoke-Cli @('settings', 'updates', 'on')) 0 '(?m)^updates\s+on\b' 'settings updates on'
+  Assert-Cli (Invoke-Cli @('settings', 'colour', 'on')) 1 'the settings are: updates, tray, startup' 'settings: an unknown one is refused'
+  Assert-Cli (Invoke-Cli @('settings', 'tray', 'maybe')) 1 'say on or off' 'settings: only on or off'
+  Assert-Cli (Invoke-Cli @('settings', 'startup', 'on')) 1 'needs an installed Twinbar' "settings startup on: not for a copy that isn't installed"
   Assert-Cli (Invoke-Cli @('list')) 0 'No profiles yet' 'list with no profiles'
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-ShortcutDir', $menu)) 1 'profile name is required' 'new without a name fails'
   Assert-Cli (Invoke-Cli @('new', '-App', (Join-Path $plain 'FakeApp.exe'), '-Name', 'Work', '-ShortcutDir', $menu)) 1 'Electron' 'new with a non-Electron app fails'
@@ -1096,11 +1135,35 @@ public static class TwinbarFakeSetup {
     Start-UpdateCheck -Manual
     [void](Wait-Until { [Windows.Forms.Application]::DoEvents(); $null -eq $script:Gui.Work } 20)
     Assert-True ($script:GuiMessages -contains "Twinbar $version is the newest version.") 'Check for updates: up to date' ($script:GuiMessages -join ' | ')
+
+    # The icon by the clock: its menu, and closing the window to it.
+    Assert-Cli (Invoke-Cli @('change', 'Windowed', '-Proxy', "socks5://127.0.0.1:$closedPort")) 0 'Changed' 'a profile whose proxy is down'
+    $trayMenu = New-Object Windows.Forms.ContextMenuStrip
+    Update-TrayMenu $trayMenu
+    $texts = @($trayMenu.Items | ForEach-Object { $_.Text })
+    Assert-True ($texts[0] -eq 'Open Twinbar' -and $texts -contains 'Fake App Listed' -and $texts -contains 'Fake App Windowed' -and $texts[-1] -eq 'Quit Twinbar') 'tray menu: Open Twinbar, the profiles, Quit' ($texts -join ' | ')
+    $windowedItem = @($trayMenu.Items | Where-Object { $_.Text -eq 'Fake App Windowed' })
+    Assert-Equal 'proxy down' $(if ($windowedItem.Count) { $windowedItem[0].ShortcutKeyDisplayString }) "tray menu: says when a profile's proxy is down"
+    Assert-True ($texts -contains 'Start Twinbar when I sign in to Windows' -and $texts -contains 'Check for updates automatically') "tray menu: Twinbar's switches"
+    $trayMenu.Dispose()
+    Set-TwinbarSetting 'trayHintShown' $true # no note by the clock during the tests
+    Add-TrayIcon
+    $mainForm.Close()
+    [Windows.Forms.Application]::DoEvents()
+    Assert-True (-not $mainForm.Visible -and -not $mainForm.IsDisposed) 'closing the window keeps Twinbar by the clock'
+    Show-MainWindow
+    Assert-True $mainForm.Visible 'the icon brings the window back'
+    Exit-TwinbarWindow
+    [Windows.Forms.Application]::DoEvents()
+    Assert-True ($mainForm.IsDisposed -and $script:Gui.Stopped) 'Quit closes the window and stops Twinbar'
   } finally {
     Remove-Item Env:\TWINBAR_UPDATE_URL -ErrorAction SilentlyContinue
     $updateServer.Stop()
-    $mainForm.Close()
-    $mainForm.Dispose()
+    if (-not $mainForm.IsDisposed) {
+      $mainForm.Close()
+      $mainForm.Dispose()
+    }
+    if ($script:Gui -and $script:Gui.Tray) { $script:Gui.Tray.Dispose() }
     $script:Gui = $null
   }
   Assert-Cli (Invoke-Cli @('remove', 'fakeapp.listed', '-DeleteData')) 0 'Removed' 'remove Listed'
@@ -1139,7 +1202,11 @@ public static class TwinbarFakeSetup {
   Assert-Cli (Invoke-Cli @('install', '-Dir', $busy)) 1 'other files' "a folder with other files isn't used"
   Assert-Cli (Invoke-Cli @('install', '-Dir', [Environment]::GetFolderPath('UserProfile'))) 1 "can't be Twinbar's folder" "the user folder isn't used"
 
+  $installedScript = Join-Path $installDir 'twinbar.ps1'
+  Assert-Cli (Invoke-Cli @('settings', 'startup', 'on') $installedScript) 0 '(?m)^startup\s+on\b' 'settings startup on, once installed'
+  Assert-Equal "`"$appExe`" --tray" ((Get-ItemProperty -Path $runKey -Name 'Twinbar' -ErrorAction SilentlyContinue).Twinbar) 'startup: Windows starts Twinbar.exe --tray at sign-in'
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Shown')) 0 'Made' 'a profile for the window'
+  Assert-True (& $findInJumpLists 'Fake App Shown') "once Twinbar is installed, a new profile goes in its jump list"
   # (Not $app: the dot-sourced script has a [string] $App, and names ignore case.)
   # Twinbar opens one window at a time: with one already open (an installed Twinbar
   # on this computer), a new Twinbar.exe just brings that one forward and ends.
@@ -1165,6 +1232,10 @@ public static class TwinbarTestWindows {
   [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr lParam);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hwnd, StringBuilder name, int size);
   [DllImport("user32.dll")] static extern IntPtr SendMessageW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
+  // What the window's X button sends (WM_SYSCOMMAND, SC_CLOSE). A plain WM_CLOSE,
+  // as Process.CloseMainWindow sends, ends Twinbar instead.
+  public static void CloseLikeUser(IntPtr window) { PostMessageW(window, 0x0112, (IntPtr)0xF060, IntPtr.Zero); }
   public static int ListRows(IntPtr window) {
     int rows = -1;
     EnumChildWindows(window, delegate (IntPtr hwnd, IntPtr lParam) {
@@ -1189,16 +1260,43 @@ public static class TwinbarTestWindows {
     if ($null -ne (Get-TaskbarAppIds)) {
       Assert-True (Wait-Until { (Get-TaskbarAppIds) -contains 'Twinbar.App' } 10) 'Twinbar has a taskbar button of its own'
     }
-    [void]$appProcess.CloseMainWindow()
-    Assert-True ($appProcess.WaitForExit(15000) -and $appProcess.ExitCode -eq 0) 'closing the window ends Twinbar.exe'
+    [TwinbarTestWindows]::CloseLikeUser($appProcess.MainWindowHandle)
+    Assert-True (Wait-Until { $appProcess.Refresh(); $appProcess.HasExited -or $appProcess.MainWindowHandle -eq [IntPtr]::Zero } 10) 'closing the window hides it'
+    Assert-True (-not $appProcess.HasExited) 'and Twinbar stays by the clock'
+    $again = [Diagnostics.Process]::Start($appExe)
+    [void]$again.WaitForExit(20000)
+    Assert-True (Wait-Until { $appProcess.Refresh(); $appProcess.MainWindowHandle -ne [IntPtr]::Zero } 15) 'opening Twinbar again shows that window'
+    $quit = [Diagnostics.Process]::Start($appExe, '--quit')
+    [void]$quit.WaitForExit(20000)
+    Assert-True ($appProcess.WaitForExit(15000) -and $appProcess.ExitCode -eq 0) 'Twinbar.exe --quit ends it'
+
+    # As Windows starts it at sign-in: just the icon by the clock.
+    $trayOnly = [Diagnostics.Process]::Start($appExe, '--tray')
+    $listening = Wait-Until {
+      $signal = $null
+      $open = [Threading.EventWaitHandle]::TryOpenExisting('Local\Twinbar.App.Show', [ref] $signal)
+      if ($open) { $signal.Dispose() }
+      $open
+    } 90
+    $trayOnly.Refresh()
+    Assert-True ($listening -and -not $trayOnly.HasExited -and $trayOnly.MainWindowHandle -eq [IntPtr]::Zero) 'Twinbar.exe --tray starts by the clock, without its window'
+    $again = [Diagnostics.Process]::Start($appExe)
+    [void]$again.WaitForExit(20000)
+    Assert-True (Wait-Until { $trayOnly.Refresh(); $trayOnly.MainWindowHandle -ne [IntPtr]::Zero } 15) 'opening Twinbar then shows its window'
+    $quit = [Diagnostics.Process]::Start($appExe, '--quit')
+    [void]$quit.WaitForExit(20000)
+    Assert-True ($trayOnly.WaitForExit(15000)) 'and --quit ends it'
+    if (-not $trayOnly.HasExited) { $trayOnly.Kill() }
   }
   if (-not $alreadyOpen -and -not $appProcess.HasExited) { $appProcess.Kill() }
   Assert-Cli (Invoke-Cli @('remove', 'fakeapp.shown', '-DeleteData')) 0 'Removed' 'remove Shown'
+  Assert-True (-not (& $findInJumpLists 'Fake App Shown')) 'and it leaves the jump list'
 
   $r = Invoke-Cli @('uninstall')
   Assert-Cli $r 0 'Uninstalled Twinbar' 'uninstall'
   Assert-True (-not (Test-Path -LiteralPath $installDir)) 'its folder is gone'
   Assert-True (-not (Test-Path -LiteralPath $appLink)) 'its Start menu entry is gone'
+  Assert-True ($null -eq (Get-ItemProperty -Path $runKey -Name 'Twinbar' -ErrorAction SilentlyContinue)) "and it doesn't start with Windows any more"
   Assert-Cli (Invoke-Cli @('uninstall', '-Dir', $installDir)) 1 "isn't installed" "uninstalling what isn't there fails"
 
   # What the Windows installer does: copy the files, then run that copy's install into its own folder.
@@ -1293,7 +1391,12 @@ public static class TwinbarTestWindows {
     }
   }
 } finally {
-  Remove-Item Env:\TWINBAR_HOME, Env:\TWINBAR_PINNED_DIR, Env:\TWINBAR_STORE_DATA, Env:\TWINBAR_SHORTCUT_DIR, Env:\TWINBAR_START_MENU -ErrorAction SilentlyContinue
+  if (Get-Command Initialize-Interop -ErrorAction SilentlyContinue) {
+    try { Initialize-Interop; [TwinbarInterop.JumpList]::Delete($jumpListId) } catch { Write-Host "  (couldn't remove the test jump list: $($_.Exception.Message))" }
+  }
+  Remove-Item -Path $runKeyRoot -Recurse -Force -ErrorAction SilentlyContinue
+  if (-not @(Get-ChildItem -Path 'HKCU:\Software\Twinbar tests' -ErrorAction SilentlyContinue).Count) { Remove-Item -Path 'HKCU:\Software\Twinbar tests' -Force -ErrorAction SilentlyContinue }
+  Remove-Item Env:\TWINBAR_HOME, Env:\TWINBAR_PINNED_DIR, Env:\TWINBAR_STORE_DATA, Env:\TWINBAR_SHORTCUT_DIR, Env:\TWINBAR_START_MENU, Env:\TWINBAR_JUMPLIST_ID, Env:\TWINBAR_RUN_KEY -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
   if (-not $storeData.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
     Remove-Item -LiteralPath $storeData -Recurse -Force -ErrorAction SilentlyContinue

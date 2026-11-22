@@ -92,8 +92,13 @@ try {
     Assert-True $up 'Twinbar opens its window'
     if ($up) {
       Assert-True ($app.MainWindowTitle -eq 'Twinbar') 'titled Twinbar' $app.MainWindowTitle
-      [void]$app.CloseMainWindow()
-      Assert-True ($app.WaitForExit(15000)) 'and closes'
+      # What the window's X button sends (WM_SYSCOMMAND, SC_CLOSE).
+      Add-Type -Namespace TwinbarInstallerTest -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);'
+      [void][TwinbarInstallerTest.User32]::PostMessageW($app.MainWindowHandle, 0x0112, [IntPtr]0xF060, [IntPtr]::Zero)
+      Assert-True (Wait-Until { $app.Refresh(); $app.HasExited -or $app.MainWindowHandle -eq [IntPtr]::Zero } 10) 'closing the window hides it'
+      Assert-True (-not $app.HasExited) 'and Twinbar stays by the clock'
+      $quit = Start-Process -FilePath $exe -ArgumentList '--quit' -PassThru -Wait
+      Assert-True ($quit.ExitCode -eq 0 -and $app.WaitForExit(15000)) 'Twinbar.exe --quit ends it'
     }
     if (-not $app.HasExited) { $app.Kill() }
   }

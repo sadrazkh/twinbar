@@ -6,6 +6,34 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-22
+
+An icon by the clock, starting with Windows, and a jump list.
+
+### Added
+
+- Twinbar's icon in the notification area while it runs. Click it for the
+  window; right-click it for your profiles, each with whether it's running and
+  whether its proxy answers ("proxy OK", "proxy down"), to open one with a
+  click. The same menu has an update when there is one, Twinbar's switches and
+  Quit Twinbar.
+- Closing the window keeps Twinbar by the clock (it says so the first time);
+  More... or the icon's menu turns that off. Quit is in the icon's menu.
+- Start Twinbar when you sign in to Windows (off by default): just the icon by
+  the clock, from `Twinbar.exe --tray` in your user's Run key. Uninstalling
+  removes it.
+- A jump list: right-click Twinbar's taskbar button (or its pinned icon) for
+  your profiles. The window and, once Twinbar is installed, the commands that
+  change profiles keep it up to date.
+- `twinbar settings [NAME on|off]`: updates, tray and startup.
+- `Twinbar.exe --quit` ends a running Twinbar; opening Twinbar while it runs
+  by the clock shows its window. `twinbar gui -Tray` starts with just the icon.
+
+### Changed
+
+- With the window hidden, a new version is announced by a note by the clock
+  instead of a dialog.
+
 ## [0.7.0] - 2026-11-22
 
 Updates from inside Twinbar, and finding the proxy on your computer.

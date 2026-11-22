@@ -11,8 +11,8 @@ Twinbar is built in phases. Each phase ends with working, tested code on
 | 4 | The Twinbar app: windows and forms, no terminal needed | Done (0.4.0) |
 | 5 | CI, signed releases, Scoop, docs | Done (0.5.0, the first release) |
 | 6 | Updates from inside Twinbar; finding the proxy on this computer | Done (0.7.0) |
-| 7 | An icon in the notification area, and a jump list of profiles | Next (0.8.0) |
-| 8 | Storage and cache, advanced options, backup and restore | Then (0.9.0) |
+| 7 | An icon in the notification area, starting with Windows, and a jump list | Done (0.8.0) |
+| 8 | Storage and cache, advanced options, backup and restore | Next (0.9.0) |
 
 ## Phase 1: core command line
 
@@ -215,9 +215,26 @@ Electron app, plus the real installed apps when run by hand.
 
 ## Phase 7: notification area and jump list (0.8.0)
 
-Planned: an icon by the clock with the profiles (and whether each proxy
-answers), closing the window to it, starting with Windows, and the profiles in
-Twinbar's jump list.
+- A `NotifyIcon` while Twinbar runs: click for the window; its menu is built
+  each time it opens, with the profiles (running or not, and a quick TCP check
+  of each proxy, half a second at most), an update if there is one, the
+  switches, and Quit. Closing the window hides it (`FormClosing` cancelled for
+  `UserClosing` only, so Windows shutting down still ends it); the app now runs
+  on an `ApplicationContext`, so it lives on without the window.
+- `Twinbar.exe --tray` starts with just the icon; `--quit` ends a running one.
+  A second `Twinbar.exe` signals the first through named events
+  (`Local\Twinbar.App.Show`, `Local\Twinbar.App.Quit`), which a 300 ms timer
+  looks at, after `AllowSetForegroundWindow` so the window can come forward.
+- Start with Windows: `"<dir>\Twinbar.exe" --tray` in
+  `HKCU\...\CurrentVersion\Run`, only for an installed Twinbar; `uninstall`
+  removes it, and the jump list.
+- The jump list: `ICustomDestinationList` tasks (an `IShellLink` per profile:
+  the launcher, the profile id, its icon, and `PKEY_Title`) under
+  `Twinbar.App`. Tasks, not a custom category, because users can't remove
+  tasks one by one, which would make the next update of the list fail.
+- Tests use their own jump list ID and Run key; they check the list's file
+  under `Recent\CustomDestinations` for the title, `--tray`, showing, hiding
+  and `--quit` end to end, and the installer test closes to the tray.
 
 ## Phase 8: storage, advanced options, backup (0.9.0)
 

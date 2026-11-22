@@ -86,8 +86,16 @@ choose its colour, badge, icon style and appearance while the preview shows the
 result. The list shows your profiles and whether each is running; select one to
 **Open**, **Edit**, **Remove** (it asks whether to delete the sign-in too) or
 **Repair** it (it asks where the app went if it moved). **Check all** runs the
-same checks as `twinbar doctor`. **More...** has the update check and the
-proxy finder. Twinbar's version is at the bottom right.
+same checks as `twinbar doctor`. **More...** has the update check, the proxy
+finder and Twinbar's switches. Twinbar's version is at the bottom right.
+
+While Twinbar runs, its icon sits by the clock. Click it for the window, or
+right-click it for your profiles: each shows whether it's running and whether
+its proxy answers, and opens with a click. Closing the window keeps Twinbar
+there (turn that off in the same menu); **Quit Twinbar** ends it. Tick **Start
+Twinbar when I sign in to Windows** to have the icon there from the start.
+Right-clicking Twinbar's taskbar button (or its pinned icon) lists your
+profiles too.
 
 ![The Twinbar window with two profiles](docs/window.png)
 
@@ -147,7 +155,8 @@ digits, spaces, `.`, `_` and `-`.
 | `open PROFILE` | Start a profile |
 | `remove PROFILE [-DeleteData]` | Remove a profile's shortcut and icon; with `-DeleteData`, its data too |
 | `apps [-Json]` | The Electron apps found in the Start menu and the Microsoft Store, with what to give `-App` |
-| `gui` | Open the Twinbar window |
+| `gui [-Tray]` | Open the Twinbar window (with `-Tray`, just its icon by the clock) |
+| `settings [NAME on\|off]` | Show or change Twinbar's settings: `updates` (check once a day), `tray` (closing the window keeps the icon by the clock), `startup` (start with Windows) |
 | `install [-Dir DIR] [-AddToPath]` / `uninstall` | Install Twinbar for you, or remove it (profiles stay) |
 | `help`, `version` | |
 

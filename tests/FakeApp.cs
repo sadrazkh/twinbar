@@ -52,6 +52,7 @@ static class FakeApp {
       "linkname=" + ((info.dwFlags & STARTF_TITLEISLINKNAME) != 0 ? title : ""),
       "https_proxy=" + (Environment.GetEnvironmentVariable("HTTPS_PROXY") ?? ""),
       "all_proxy=" + (Environment.GetEnvironmentVariable("ALL_PROXY") ?? ""),
+      "testvar=" + (Environment.GetEnvironmentVariable("TWINBAR_TEST_VAR") ?? ""),
       "commandline=" + Environment.CommandLine
     });
 
