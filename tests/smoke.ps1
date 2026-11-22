@@ -1276,16 +1276,19 @@ public static class TwinbarTestWindows {
     $element = [System.Windows.Automation.AutomationElement]::FromHandle($appProcess.MainWindowHandle)
     $windowNames = @($element.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name })
     Assert-True ($windowNames -contains 'New profile...' -and $windowNames -contains 'Check all') 'and has its buttons'
+    $windowLog = Join-Path $twHome 'logs\window.log'
     $second = [Diagnostics.Process]::Start($appExe)
     Assert-True ($second.WaitForExit(20000) -and $second.ExitCode -eq 0) 'a second Twinbar.exe just brings the window forward'
     Assert-True (-not $appProcess.HasExited) 'the first one stays open'
+    # The first one picks the request up on its next look (every 0.3 s). Closing the
+    # window before that would have it come straight back, so wait for it.
+    Assert-True (Wait-Until { [string](Get-Content -LiteralPath $windowLog -Raw -ErrorAction SilentlyContinue) -match 'asked to show the window' } 10) 'and the first one brings its window forward'
     if ($null -ne (Get-TaskbarAppIds)) {
       Assert-True (Wait-Until { (Get-TaskbarAppIds) -contains 'Twinbar.App' } 10) 'Twinbar has a taskbar button of its own'
     }
     $appWindow = $appProcess.MainWindowHandle
     $posted = [TwinbarTestWindows]::CloseLikeUser($appWindow)
     $hidden = Wait-Until { $appProcess.HasExited -or -not [TwinbarTestWindows]::IsWindowVisible($appWindow) } 20
-    $windowLog = Join-Path $twHome 'logs\window.log'
     $seen = if ($appProcess.HasExited) { 'it exited' } else {
       '{0} visible: {1} window visible: {2}; settings: {3}; log: {4}' -f $posted, [TwinbarTestWindows]::VisibleWindows($appProcess.Id), [TwinbarTestWindows]::IsWindowVisible($appWindow),
       ([IO.File]::ReadAllText((Join-Path $twHome 'settings.json')) -replace '\s+', ' '),
