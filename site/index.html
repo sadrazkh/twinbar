@@ -1,0 +1,1379 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Twinbar · Two of every app on Windows</title>
+<meta name="description" content="Twinbar gives Slack, Claude, Postman, Discord and other Electron apps a second, separately signed-in copy on Windows, with its own taskbar button and icon. Free and open source.">
+<meta name="theme-color" content="#0a0c13">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Twinbar · Two of every app on Windows">
+<meta property="og:description" content="A second, separately signed-in copy of your Electron apps, with its own taskbar button, icon, proxy and kill switch.">
+<meta property="og:url" content="https://sadrazkh.github.io/twinbar/">
+<meta property="og:image" content="https://github.com/sadrazkh/twinbar/raw/main/docs/styles.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23a78bfa'/%3E%3Cstop offset='1' stop-color='%232dd4bf'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='5' y='9' width='36' height='30' rx='7' fill='none' stroke='%232dd4bf' stroke-width='5'/%3E%3Crect x='23' y='25' width='36' height='30' rx='7' fill='url(%23g)'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&family=Vazirmatn:wght@400;500;700;800&display=swap" rel="stylesheet">
+<script>
+  (function () {
+    var theme = null, lang = null;
+    try { theme = localStorage.getItem('twinbar-theme'); lang = localStorage.getItem('twinbar-lang'); } catch (e) {}
+    if (!theme) theme = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', theme);
+    if (!lang) lang = (navigator.language || '').toLowerCase().indexOf('fa') === 0 ? 'fa' : 'en';
+    document.documentElement.lang = lang;
+    document.documentElement.dir = lang === 'fa' ? 'rtl' : 'ltr';
+  })();
+</script>
+<style>
+:root {
+  --bg: #090b12;
+  --bg-2: #0e1120;
+  --surface: rgba(255, 255, 255, .035);
+  --surface-2: rgba(255, 255, 255, .065);
+  --line: rgba(255, 255, 255, .09);
+  --line-2: rgba(255, 255, 255, .16);
+  --text: #eef1f8;
+  --muted: #a0a8bf;
+  --faint: #6c7592;
+  --violet: #8b5cf6;
+  --blue: #3b82f6;
+  --teal: #14b8a6;
+  --ok: #22c55e;
+  --bad: #ef4444;
+  --warn: #f59e0b;
+  --grad: linear-gradient(115deg, #b69cff 0%, #6ea8ff 45%, #2ee0c6 100%);
+  --grad-btn: linear-gradient(115deg, #7c5cff 0%, #3b82f6 55%, #10b4a0 100%);
+  --shadow: 0 40px 90px -30px rgba(0, 0, 0, .75);
+  --shadow-sm: 0 10px 30px -12px rgba(0, 0, 0, .5);
+  --code-bg: #0b0e18;
+  --radius: 20px;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #f5f6fb;
+  --bg-2: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #eef1f8;
+  --line: rgba(20, 26, 48, .10);
+  --line-2: rgba(20, 26, 48, .18);
+  --text: #11142a;
+  --muted: #535d78;
+  --faint: #8a93aa;
+  --shadow: 0 40px 80px -36px rgba(40, 52, 100, .38);
+  --shadow-sm: 0 10px 26px -14px rgba(40, 52, 100, .35);
+  --code-bg: #0f1322;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.65 'Inter', 'Vazirmatn', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased; overflow-x: hidden;
+}
+html[lang="fa"] body { font-family: 'Vazirmatn', 'Inter', system-ui, sans-serif; line-height: 1.85; }
+a { color: inherit; }
+img { max-width: 100%; }
+code, pre, .mono { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+@media (max-width: 640px) { .wrap { padding: 0 16px; } }
+
+/* background glow and grid */
+.bgfx { position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; }
+.bgfx::before {
+  content: ""; position: absolute; inset: -20%;
+  background:
+    radial-gradient(40% 35% at 18% 12%, rgba(139, 92, 246, .22), transparent 70%),
+    radial-gradient(35% 30% at 85% 8%, rgba(20, 184, 166, .18), transparent 70%),
+    radial-gradient(45% 40% at 60% 95%, rgba(59, 130, 246, .14), transparent 70%);
+  filter: blur(10px);
+}
+.bgfx::after {
+  content: ""; position: absolute; inset: 0;
+  background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 64px 64px; opacity: .35;
+  mask-image: radial-gradient(70% 60% at 50% 0%, #000 30%, transparent 75%);
+  -webkit-mask-image: radial-gradient(70% 60% at 50% 0%, #000 30%, transparent 75%);
+}
+:root[data-theme="light"] .bgfx::after { opacity: .6; }
+
+/* nav */
+.nav { position: sticky; top: 0; z-index: 50; backdrop-filter: saturate(160%) blur(14px); -webkit-backdrop-filter: saturate(160%) blur(14px); background: color-mix(in srgb, var(--bg) 72%, transparent); border-bottom: 1px solid var(--line); }
+.nav .wrap { display: flex; align-items: center; gap: 18px; height: 68px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 19px; letter-spacing: -.01em; text-decoration: none; }
+.brand svg { width: 30px; height: 30px; }
+.navlinks { display: flex; gap: 4px; margin-inline-start: 18px; }
+.navlinks a { text-decoration: none; color: var(--muted); font-weight: 500; font-size: 15px; padding: 8px 12px; border-radius: 10px; transition: color .2s, background .2s; }
+.navlinks a:hover { color: var(--text); background: var(--surface-2); }
+.navtools { margin-inline-start: auto; display: flex; gap: 8px; align-items: center; }
+.iconbtn { height: 38px; min-width: 38px; padding: 0 10px; border-radius: 11px; border: 1px solid var(--line); background: var(--surface); color: var(--text); display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; font: 600 14px/1 inherit; font-family: inherit; text-decoration: none; transition: border-color .2s, transform .2s; }
+.iconbtn:hover { border-color: var(--line-2); transform: translateY(-1px); }
+.iconbtn svg { width: 18px; height: 18px; }
+@media (max-width: 860px) { .navlinks { display: none; } }
+
+/* buttons */
+.btn { display: inline-flex; align-items: center; gap: 10px; padding: 14px 22px; border-radius: 14px; font-weight: 700; font-size: 16px; text-decoration: none; border: 1px solid transparent; cursor: pointer; transition: transform .2s, box-shadow .2s, border-color .2s; font-family: inherit; }
+.btn svg { width: 20px; height: 20px; }
+.btn-primary { color: #fff; background: var(--grad-btn); box-shadow: 0 14px 34px -12px rgba(91, 92, 255, .7); }
+.btn-primary:hover { transform: translateY(-2px); box-shadow: 0 20px 40px -14px rgba(91, 92, 255, .85); }
+.btn-ghost { color: var(--text); background: var(--surface); border-color: var(--line-2); }
+.btn-ghost:hover { transform: translateY(-2px); border-color: var(--text); }
+
+/* hero */
+.hero { padding: 76px 0 40px; text-align: center; }
+.eyebrow { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--surface); color: var(--muted); font-size: 13.5px; font-weight: 600; }
+.eyebrow .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px rgba(34, 197, 94, .18); }
+h1 { font-size: clamp(40px, 7vw, 82px); line-height: 1.02; letter-spacing: -.035em; margin: 22px auto 18px; font-weight: 800; max-width: 14ch; }
+html[lang="fa"] h1 { letter-spacing: 0; line-height: 1.25; max-width: 18ch; }
+.grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.lead { font-size: clamp(17px, 2.1vw, 20px); color: var(--muted); max-width: 720px; margin: 0 auto; }
+.cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 32px; }
+.meta { margin-top: 16px; color: var(--faint); font-size: 14px; }
+.meta b { color: var(--muted); font-weight: 600; }
+
+/* the desktop demo */
+.stage { margin: 54px auto 0; max-width: 1040px; position: relative; }
+.stage::before { content: ""; position: absolute; inset: 8% 6% -6%; background: var(--grad); filter: blur(70px); opacity: .28; border-radius: 40px; z-index: -1; }
+.desk { container-type: inline-size; position: relative; aspect-ratio: 16 / 10; border-radius: 22px; overflow: hidden; border: 1px solid var(--line-2); box-shadow: var(--shadow); user-select: none; text-align: start; direction: ltr;
+  background: radial-gradient(120% 90% at 0% 0%, #4c3fbf 0%, transparent 55%), radial-gradient(90% 90% at 100% 100%, #0d8f86 0%, transparent 55%), linear-gradient(140deg, #1c1c4a, #121a34 50%, #0b2a35); }
+.desk .inner { position: absolute; inset: 0; font-size: 1.25cqw; font-family: 'Segoe UI', 'Inter', system-ui, sans-serif; }
+@supports not (font-size: 1cqw) { .desk .inner { font-size: 11px; } }
+.desk .swirl { position: absolute; width: 70%; aspect-ratio: 1; left: 30%; top: -20%; border-radius: 50%; background: conic-gradient(from 200deg, rgba(167, 139, 250, .35), rgba(46, 224, 198, .25), rgba(96, 165, 250, .3), rgba(167, 139, 250, .35)); filter: blur(30px); opacity: .7; }
+.win { position: absolute; width: 60%; height: 70%; border-radius: .9em; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 2.4em 5em -1.4em rgba(0, 0, 0, .65), 0 0 0 1px rgba(255, 255, 255, .08); transition: transform .35s cubic-bezier(.2, .8, .2, 1), opacity .3s, filter .3s; transform-origin: 50% 120%; }
+.win.min, .win.closed { transform: scale(.6) translateY(40%); opacity: 0; pointer-events: none; }
+.win:not(.top) { filter: saturate(.85) brightness(.92); }
+.win .tbar { height: 2.6em; display: flex; align-items: center; gap: .6em; padding: 0 .4em 0 .9em; font-size: .95em; flex: none; }
+.win .tbar img { width: 1.35em; height: 1.35em; }
+.win .tbar .ttl { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.win .ctl { display: flex; }
+.win .ctl span { width: 2.9em; height: 2.6em; display: grid; place-items: center; font-size: .9em; cursor: pointer; opacity: .75; }
+.win .ctl span:hover { background: rgba(127, 127, 127, .2); opacity: 1; }
+.win .ctl span.x:hover { background: #c42b1c; color: #fff; }
+.chat { flex: 1; display: grid; grid-template-columns: 30% 1fr; min-height: 0; }
+.chat .side { padding: 1em .8em; display: flex; flex-direction: column; gap: .35em; }
+.chat .ws { display: flex; align-items: center; gap: .6em; font-weight: 700; margin-bottom: .6em; font-size: 1.05em; }
+.chat .ws i { width: 2em; height: 2em; border-radius: .55em; display: grid; place-items: center; font-style: normal; color: #fff; font-weight: 800; }
+.chat .ch { padding: .3em .6em; border-radius: .4em; opacity: .8; font-size: .95em; }
+.chat .ch.on { opacity: 1; font-weight: 600; }
+.chat .main { padding: 1em 1.2em; display: flex; flex-direction: column; gap: .9em; overflow: hidden; }
+.chat .head { font-weight: 700; padding-bottom: .6em; font-size: 1.05em; }
+.msg { display: flex; gap: .7em; align-items: flex-start; }
+.msg i { flex: none; width: 2.3em; height: 2.3em; border-radius: .6em; display: grid; place-items: center; color: #fff; font-style: normal; font-weight: 700; font-size: .9em; }
+.msg b { display: block; font-size: .92em; }
+.msg span { font-size: .95em; opacity: .85; }
+.acct { margin-top: auto; display: flex; align-items: center; gap: .55em; font-size: .85em; opacity: .8; padding-top: .6em; }
+.acct i { width: 1.8em; height: 1.8em; border-radius: 50%; display: grid; place-items: center; font-style: normal; color: #fff; font-weight: 700; font-size: .85em; }
+/* personal: light app; work: always dark (its own appearance) */
+.win.personal { left: 5%; top: 6%; background: #fbfbfe; color: #1d1f2e; }
+.win.personal .tbar { background: #f0f0f6; }
+.win.personal .side { background: #ececf5; }
+.win.personal .ch.on { background: #dcdcf0; }
+.win.work { left: 33%; top: 13%; background: #16181f; color: #e7e9f0; }
+.win.work .tbar { background: #1d2029; }
+.win.work .side { background: #12141a; }
+.win.work .ch.on { background: #20323a; }
+.win.app { left: 18%; top: 9%; width: 62%; height: 62%; background: #f3f3f3; color: #1a1a1a; font-family: 'Segoe UI', 'Inter', sans-serif; }
+.win.app .tbar { background: #fff; }
+.tw-list { margin: .6em .8em 0; background: #fff; border: 1px solid #d9d9d9; flex: 1; overflow: hidden; font-size: .92em; }
+.tw-row { display: grid; grid-template-columns: 34% 14% 1fr; gap: .4em; padding: .35em .6em; align-items: center; }
+.tw-row.h { background: #f7f7f7; border-bottom: 1px solid #e5e5e5; color: #555; }
+.tw-row.sel { background: #cce4f7; }
+.tw-row img { width: 1.4em; vertical-align: middle; margin-inline-end: .4em; }
+.tw-btns { display: flex; gap: .4em; padding: .6em .8em; flex-wrap: wrap; }
+.tw-btns span { border: 1px solid #c4c4c4; background: #fdfdfd; padding: .25em .8em; border-radius: .3em; font-size: .9em; }
+.tw-status { display: flex; justify-content: space-between; padding: .3em .8em; background: #f0f0f0; border-top: 1px solid #ddd; font-size: .85em; color: #444; }
+.tw-status a { color: #0067c0; text-decoration: underline; }
+
+.taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 4em; display: flex; align-items: center; justify-content: center; gap: .3em; background: rgba(26, 28, 44, .72); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); border-top: 1px solid rgba(255, 255, 255, .08); z-index: 20; }
+.tbb { position: relative; width: 3.1em; height: 3.1em; border-radius: .6em; display: grid; place-items: center; cursor: pointer; transition: background .2s; }
+.tbb:hover { background: rgba(255, 255, 255, .1); }
+.tbb img, .tbb svg { width: 1.9em; height: 1.9em; }
+.tbb::after { content: ""; position: absolute; bottom: .18em; left: 50%; width: 0; height: .22em; border-radius: 1em; background: #9aa3b8; transform: translateX(-50%); transition: width .25s, background .25s; }
+.tbb.open::after { width: .5em; }
+.tbb.active { background: rgba(255, 255, 255, .12); }
+.tbb.active::after { width: 1.25em; background: #6ea8ff; }
+.tbb .tip { position: absolute; bottom: 3.7em; left: 50%; transform: translateX(-50%) translateY(.4em); background: rgba(30, 32, 44, .95); color: #fff; padding: .35em .7em; border-radius: .45em; white-space: nowrap; font-size: .9em; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; }
+.tbb:hover .tip { opacity: 1; transform: translateX(-50%) translateY(0); }
+.tbb.hidden { display: none; }
+.tray { position: absolute; right: .8em; bottom: 0; height: 4em; display: flex; align-items: center; gap: .5em; color: #e9ecf5; font-size: .95em; z-index: 21; }
+.tray .ico { width: 2.3em; height: 2.3em; border-radius: .45em; display: grid; place-items: center; cursor: pointer; }
+.tray .ico:hover, .tray .ico.on { background: rgba(255, 255, 255, .12); }
+.tray .ico svg { width: 1.45em; height: 1.45em; }
+.tray .clock { text-align: right; line-height: 1.25; font-size: .9em; padding: 0 .4em; }
+.tray .pulse { position: absolute; width: 2.3em; height: 2.3em; border-radius: .45em; box-shadow: 0 0 0 0 rgba(110, 168, 255, .7); animation: pulse 2.2s infinite; pointer-events: none; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(110, 168, 255, .6); } 70% { box-shadow: 0 0 0 1em rgba(110, 168, 255, 0); } 100% { box-shadow: 0 0 0 0 rgba(110, 168, 255, 0); } }
+.start { position: absolute; left: .9em; bottom: 0; height: 4em; display: flex; align-items: center; gap: .5em; color: #cfd4e4; font-size: .9em; z-index: 21; }
+.menu { position: absolute; right: .9em; bottom: 4.5em; width: 25em; background: rgba(36, 38, 52, .97); color: #eef0f6; border: 1px solid rgba(255, 255, 255, .1); border-radius: .7em; padding: .4em; z-index: 30; box-shadow: 0 1.6em 3.5em -1em rgba(0, 0, 0, .7); transform-origin: 90% 100%; transition: opacity .18s, transform .18s; }
+.menu.hide { opacity: 0; transform: scale(.96) translateY(.6em); pointer-events: none; }
+.mi { display: flex; align-items: center; gap: .7em; padding: .5em .7em; border-radius: .4em; cursor: pointer; font-size: .95em; }
+.mi:hover { background: rgba(255, 255, 255, .09); }
+.mi img { width: 1.5em; height: 1.5em; }
+.mi .n { margin-left: auto; font-size: .85em; color: #a9b0c4; white-space: nowrap; }
+.mi .n.okn { color: #7ee2a8; }
+.mi .n.badn { color: #ff9b9b; }
+.mi.b { font-weight: 700; }
+.mi .chk { width: 1.5em; text-align: center; color: #8ab4ff; }
+.msep { height: 1px; background: rgba(255, 255, 255, .1); margin: .35em .3em; }
+.toast { position: absolute; right: 1em; bottom: 4.8em; max-width: 26em; background: rgba(36, 38, 52, .97); color: #eef0f6; border: 1px solid rgba(255, 255, 255, .12); border-radius: .7em; padding: .8em 1em; z-index: 29; box-shadow: 0 1.6em 3em -1em rgba(0, 0, 0, .6); font-size: .95em; transition: opacity .25s, transform .25s; }
+.toast b { display: block; margin-bottom: .2em; }
+.toast.hide { opacity: 0; transform: translateY(.8em); pointer-events: none; }
+.hint { margin-top: 18px; color: var(--muted); font-size: 14.5px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.hint svg { width: 18px; height: 18px; color: var(--teal); }
+
+/* app marquee */
+.works { padding: 40px 0 10px; text-align: center; }
+.works p { color: var(--faint); font-size: 13px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; margin: 0 0 18px; }
+html[lang="fa"] .works p { letter-spacing: 0; font-size: 14px; }
+.marquee { overflow: hidden; mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); direction: ltr; }
+.track { display: flex; gap: 12px; width: max-content; animation: slide 38s linear infinite; }
+.marquee:hover .track { animation-play-state: paused; }
+@keyframes slide { to { transform: translateX(-50%); } }
+.chip { display: inline-flex; align-items: center; gap: 9px; padding: 9px 16px 9px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-weight: 600; font-size: 14.5px; white-space: nowrap; }
+.chip i { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; color: #fff; font-style: normal; font-size: 12px; font-weight: 800; }
+
+/* sections */
+section { padding: 110px 0 0; }
+.sh { text-align: center; max-width: 760px; margin: 0 auto 50px; }
+.kicker { color: var(--teal); font-weight: 700; font-size: 13px; letter-spacing: .16em; text-transform: uppercase; }
+html[lang="fa"] .kicker { letter-spacing: 0; font-size: 14px; }
+h2 { font-size: clamp(30px, 4.4vw, 50px); line-height: 1.08; letter-spacing: -.03em; margin: 10px 0 14px; font-weight: 800; }
+html[lang="fa"] h2 { letter-spacing: 0; line-height: 1.35; }
+.sh p { color: var(--muted); font-size: 18px; margin: 0; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+:root[data-theme="light"] .card { box-shadow: var(--shadow-sm); }
+
+/* playground */
+.play { display: grid; grid-template-columns: 1.05fr 1fr; gap: 22px; }
+@media (max-width: 920px) { .play { grid-template-columns: 1fr; } }
+.controls { padding: 26px; display: grid; gap: 20px; }
+.field label, .flabel { display: block; font-size: 13px; font-weight: 700; color: var(--muted); margin-bottom: 8px; letter-spacing: .02em; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 520px) { .row2 { grid-template-columns: 1fr; } }
+input[type="text"] { width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--bg-2); color: var(--text); padding: 0 14px; font: 500 15px inherit; font-family: inherit; outline: none; transition: border-color .2s, box-shadow .2s; }
+input[type="text"]:focus { border-color: var(--violet); box-shadow: 0 0 0 4px rgba(139, 92, 246, .18); }
+.apps { display: flex; flex-wrap: wrap; gap: 8px; }
+.apps button, .seg button { font: 600 14px inherit; font-family: inherit; color: var(--muted); background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 11px; padding: 8px 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: all .18s; }
+.apps button i { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; color: #fff; font-style: normal; font-size: 11px; font-weight: 800; }
+.apps button[aria-pressed="true"], .seg button[aria-pressed="true"] { color: var(--text); border-color: var(--violet); background: color-mix(in srgb, var(--violet) 16%, var(--bg-2)); }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.swatches { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; }
+.sw { width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; position: relative; transition: transform .15s; }
+.sw:hover { transform: scale(1.12); }
+.sw[aria-pressed="true"] { box-shadow: 0 0 0 3px var(--bg), 0 0 0 5px var(--text); }
+.sw.custom { background: conic-gradient(#f43f5e, #f59e0b, #22c55e, #06b6d4, #6366f1, #d946ef, #f43f5e); overflow: hidden; }
+.sw.custom input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.auto { font-size: 12.5px; color: var(--faint); margin-inline-start: 4px; }
+.switch { display: flex; align-items: center; gap: 12px; cursor: pointer; font-weight: 600; font-size: 15px; }
+.switch input { display: none; }
+.knob { width: 46px; height: 26px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--line-2); position: relative; transition: background .2s; flex: none; }
+.knob::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform .2s; box-shadow: 0 2px 6px rgba(0, 0, 0, .3); }
+.switch input:checked + .knob { background: var(--grad-btn); }
+.switch input:checked + .knob::after { transform: translateX(20px); }
+html[dir="rtl"] .switch input:checked + .knob::after { transform: translateX(20px); }
+.warnline { color: var(--warn); font-size: 13.5px; }
+.warnline:empty { display: none; }
+.preview { padding: 26px; display: flex; flex-direction: column; gap: 18px; }
+.bigicon { display: grid; place-items: center; padding: 26px; border-radius: 18px; background:
+  linear-gradient(45deg, var(--surface-2) 25%, transparent 25%, transparent 75%, var(--surface-2) 75%) 0 0 / 22px 22px,
+  linear-gradient(45deg, var(--surface-2) 25%, transparent 25%, transparent 75%, var(--surface-2) 75%) 11px 11px / 22px 22px; border: 1px solid var(--line); }
+.bigicon img { width: 168px; height: 168px; filter: drop-shadow(0 18px 30px rgba(0, 0, 0, .35)); transition: transform .3s; }
+.bigicon img:hover { transform: scale(1.04) rotate(-2deg); }
+.minis { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.mini { border: 1px solid var(--line); border-radius: 14px; padding: 12px; background: var(--bg-2); }
+.mini .flabel { margin-bottom: 10px; }
+.startitem { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: #1f2230; color: #eef0f6; direction: ltr; }
+.startitem img { width: 30px; height: 30px; }
+.startitem small { display: block; color: #9aa1b5; font-size: 12px; }
+.minitb { display: flex; gap: 8px; align-items: flex-end; justify-content: center; padding: 8px; border-radius: 10px; background: #1f2230; direction: ltr; }
+.minitb div { text-align: center; color: #aab1c4; font-size: 11px; }
+.minitb img { width: 34px; height: 34px; display: block; margin: 0 auto 4px; padding: 5px; border-radius: 9px; background: rgba(255, 255, 255, .08); }
+.cmd { position: relative; background: var(--code-bg); color: #dfe5f5; border-radius: 14px; padding: 16px 18px; font-size: 13.5px; line-height: 1.7; border: 1px solid rgba(255, 255, 255, .08); direction: ltr; text-align: left; }
+.cmd:has(.copy) { padding-right: 78px; }
+.cmd code { white-space: pre-wrap; overflow-wrap: anywhere; display: block; }
+.dl > *, .play > *, .proxy > * { min-width: 0; }
+.cmd .p { color: #6ee7b7; }
+.cmd .k { color: #c4b5fd; }
+.cmd .v { color: #fde68a; }
+.cmd .c { color: #7c859e; }
+.copy { position: absolute; top: 10px; right: 10px; font: 600 12px inherit; font-family: 'Inter', sans-serif; color: #dfe5f5; background: rgba(255, 255, 255, .08); border: 1px solid rgba(255, 255, 255, .14); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+.copy:hover { background: rgba(255, 255, 255, .16); }
+.idline { color: var(--faint); font-size: 13px; }
+.idline code { color: var(--muted); }
+
+/* features */
+.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+@media (max-width: 1040px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+.feat { padding: 24px; position: relative; overflow: hidden; transition: transform .25s, border-color .25s; }
+.feat:hover { transform: translateY(-4px); border-color: var(--line-2); }
+.feat::after { content: ""; position: absolute; inset: auto -40% -60% auto; width: 80%; aspect-ratio: 1; border-radius: 50%; background: radial-gradient(closest-side, var(--glow, rgba(139, 92, 246, .22)), transparent); opacity: 0; transition: opacity .3s; }
+html[dir="rtl"] .feat::after { inset: auto auto -60% -40%; }
+.feat:hover::after { opacity: 1; }
+.feat .fi { width: 46px; height: 46px; border-radius: 13px; display: grid; place-items: center; font-size: 22px; background: var(--surface-2); border: 1px solid var(--line); margin-bottom: 16px; }
+.feat h3 { margin: 0 0 6px; font-size: 17px; letter-spacing: -.01em; }
+.feat p { margin: 0; color: var(--muted); font-size: 14.5px; }
+.feat.new .tag { position: absolute; top: 18px; inset-inline-end: 18px; font-size: 11px; font-weight: 800; padding: 3px 8px; border-radius: 99px; background: var(--grad-btn); color: #fff; letter-spacing: .04em; }
+
+/* how it works */
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; position: relative; }
+@media (max-width: 860px) { .steps { grid-template-columns: 1fr; } }
+.step { padding: 26px; position: relative; }
+.step .num { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; font-weight: 800; color: #fff; background: var(--grad-btn); margin-bottom: 16px; }
+.step h3 { margin: 0 0 8px; font-size: 18px; }
+.step p { color: var(--muted); margin: 0 0 14px; font-size: 15px; }
+.step .art { border-radius: 12px; background: var(--code-bg); color: #dfe5f5; padding: 12px 14px; font-size: 12.5px; direction: ltr; text-align: left; border: 1px solid rgba(255, 255, 255, .08); overflow-x: auto; white-space: nowrap; }
+.step .art .k { color: #c4b5fd; }
+.step .art .v { color: #fde68a; }
+.step .art .p { color: #6ee7b7; }
+.note { text-align: center; color: var(--faint); font-size: 14px; margin-top: 22px; }
+
+/* proxy */
+.proxy { display: grid; grid-template-columns: 1fr 1.25fr; gap: 22px; align-items: stretch; }
+@media (max-width: 920px) { .proxy { grid-template-columns: 1fr; } }
+.proxy .txt { padding: 28px; display: flex; flex-direction: column; gap: 16px; }
+.proxy .txt p { margin: 0; color: var(--muted); }
+.bul { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+.bul li { display: flex; gap: 10px; color: var(--muted); font-size: 15px; }
+.bul li b { color: var(--text); }
+.bul svg { width: 20px; height: 20px; flex: none; color: var(--ok); margin-top: 3px; }
+.tipbox { border: 1px dashed var(--line-2); border-radius: 12px; padding: 12px 14px; font-size: 14px; color: var(--muted); }
+.viz { padding: 22px; display: flex; flex-direction: column; gap: 16px; }
+.viz svg { width: 100%; height: auto; direction: ltr; }
+.viz .ctrlrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.status { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; padding: 12px 14px; border-radius: 12px; background: color-mix(in srgb, var(--ok) 12%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); transition: all .25s; }
+.status.down { background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
+.status .led { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px rgba(34, 197, 94, .2); flex: none; }
+.status.down .led { background: var(--bad); box-shadow: 0 0 0 4px rgba(239, 68, 68, .2); }
+.node { fill: var(--surface-2); stroke: var(--line-2); stroke-width: 1.5; }
+.vlabel { fill: var(--text); font: 700 17px 'Inter', 'Vazirmatn', sans-serif; }
+.vsub { fill: var(--muted); font: 500 13.5px 'JetBrains Mono', 'Vazirmatn', monospace; }
+.wire { stroke: var(--line-2); stroke-width: 3; fill: none; stroke-linecap: round; }
+.wire.live { stroke: url(#wireg); }
+.bypass { stroke: var(--bad); stroke-width: 2.5; stroke-dasharray: 6 7; fill: none; opacity: .55; }
+.pkt { fill: #6ee7b7; filter: drop-shadow(0 0 6px rgba(110, 231, 183, .9)); }
+.viz .x { opacity: 0; transition: opacity .25s; }
+.viz.down .x { opacity: 1; }
+.viz.down .p2 { opacity: 0; }
+.viz.down .pkt.p1 { fill: #fca5a5; filter: drop-shadow(0 0 6px rgba(239, 68, 68, .9)); }
+.viz.down .wire.w2 { stroke: var(--line); }
+.viz.down .globe { opacity: .35; }
+.globe { transition: opacity .3s; }
+
+/* terminal */
+.term { overflow: hidden; border-radius: 18px; background: var(--code-bg); border: 1px solid rgba(255, 255, 255, .09); box-shadow: var(--shadow); direction: ltr; text-align: left; }
+.term .bar { display: flex; align-items: center; gap: 14px; padding: 10px 14px; background: rgba(255, 255, 255, .04); border-bottom: 1px solid rgba(255, 255, 255, .07); overflow-x: auto; }
+.term .dots { display: flex; gap: 7px; flex: none; }
+.term .dots i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+.tabs { display: flex; gap: 4px; }
+.tabs button { font: 600 13px 'JetBrains Mono', monospace; color: #8f98b3; background: transparent; border: 1px solid transparent; padding: 6px 11px; border-radius: 9px; cursor: pointer; white-space: nowrap; }
+.tabs button[aria-selected="true"] { color: #fff; background: rgba(255, 255, 255, .08); border-color: rgba(255, 255, 255, .12); }
+.term pre { margin: 0; padding: 22px 24px 26px; min-height: 290px; color: #d8deef; font-size: 13.5px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
+.term .ps { color: #6ee7b7; }
+.term .cmdline { color: #fff; }
+.term .o-ok { color: #86efac; }
+.term .o-dim { color: #8a93ad; }
+.term .o-hi { color: #fde68a; }
+.caret { display: inline-block; width: .6em; height: 1.15em; background: #c4b5fd; vertical-align: -.2em; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* download */
+.dl { display: grid; grid-template-columns: 1.1fr 1fr; gap: 22px; }
+@media (max-width: 920px) { .dl { grid-template-columns: 1fr; } }
+.dlmain { padding: 32px; position: relative; overflow: hidden; }
+.dlmain::before { content: ""; position: absolute; inset: -30% -30% auto auto; width: 70%; aspect-ratio: 1; background: radial-gradient(closest-side, rgba(139, 92, 246, .25), transparent); }
+html[dir="rtl"] .dlmain::before { inset: -30% auto auto -30%; }
+.ver { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; position: relative; }
+.ver .big { font-size: 44px; font-weight: 800; letter-spacing: -.03em; }
+.ver .when { color: var(--faint); font-size: 14px; }
+.ol { counter-reset: s; list-style: none; padding: 0; margin: 22px 0 26px; display: grid; gap: 12px; position: relative; }
+.ol li { counter-increment: s; display: flex; gap: 12px; color: var(--muted); font-size: 15px; }
+.ol li::before { content: counter(s); flex: none; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; font-weight: 800; font-size: 13px; color: var(--text); background: var(--surface-2); border: 1px solid var(--line); }
+.dlside { padding: 28px; display: flex; flex-direction: column; gap: 18px; }
+.dlside h3 { margin: 0; font-size: 17px; }
+.req { display: flex; flex-wrap: wrap; gap: 8px; }
+.req span { font-size: 13px; font-weight: 600; color: var(--muted); padding: 6px 11px; border-radius: 99px; border: 1px solid var(--line); background: var(--bg-2); }
+.small { color: var(--faint); font-size: 13.5px; }
+.linkrow { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* news */
+.news { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.rel { padding: 20px 22px; text-decoration: none; display: flex; flex-direction: column; gap: 8px; transition: transform .2s, border-color .2s; }
+.rel:hover { transform: translateY(-3px); border-color: var(--line-2); }
+.rel .top { display: flex; align-items: center; gap: 10px; }
+.rel .v { font: 700 13px 'JetBrains Mono', monospace; padding: 3px 9px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--line); }
+.rel .d { color: var(--faint); font-size: 13px; }
+.rel .latest { margin-inline-start: auto; font-size: 11px; font-weight: 800; padding: 3px 8px; border-radius: 99px; background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.rel h3 { margin: 0; font-size: 16.5px; line-height: 1.4; }
+.center { text-align: center; margin-top: 26px; }
+
+/* faq */
+.faq { max-width: 860px; margin: 0 auto; display: grid; gap: 12px; }
+details { border: 1px solid var(--line); border-radius: 16px; background: var(--surface); overflow: hidden; transition: border-color .2s; }
+details[open] { border-color: var(--line-2); }
+summary { list-style: none; cursor: pointer; padding: 18px 22px; font-weight: 700; font-size: 16.5px; display: flex; align-items: center; gap: 12px; }
+summary::-webkit-details-marker { display: none; }
+summary::after { content: "+"; margin-inline-start: auto; font-size: 22px; font-weight: 500; color: var(--muted); transition: transform .25s; }
+details[open] summary::after { transform: rotate(45deg); }
+details .a { padding: 0 22px 20px; color: var(--muted); font-size: 15.5px; }
+details .a code { background: var(--surface-2); padding: 1px 6px; border-radius: 6px; font-size: .9em; color: var(--text); direction: ltr; unicode-bidi: embed; }
+
+/* closing */
+.closing { margin-top: 110px; padding: 60px 30px; text-align: center; position: relative; overflow: hidden; }
+.closing::before { content: ""; position: absolute; inset: 0; background: var(--grad); opacity: .12; }
+.closing > * { position: relative; }
+.closing h2 { margin-top: 0; }
+footer { padding: 50px 0 60px; color: var(--faint); font-size: 14px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 28px; align-items: center; justify-content: space-between; }
+footer nav { display: flex; gap: 18px; flex-wrap: wrap; }
+footer a { text-decoration: none; color: var(--muted); }
+footer a:hover { color: var(--text); }
+
+/* reveal on scroll */
+.reveal { opacity: 0; transform: translateY(22px); transition: opacity .7s ease, transform .7s cubic-bezier(.2, .8, .2, 1); }
+.reveal.in { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .reveal { opacity: 1; transform: none; transition: none; }
+  .track { animation: none; flex-wrap: wrap; width: auto; justify-content: center; }
+  .tray .pulse, .caret { animation: none; }
+  .win { transition: none; }
+}
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<div class="bgfx" aria-hidden="true"></div>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="Twinbar">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b69cff"/><stop offset="1" stop-color="#2ee0c6"/></linearGradient></defs><rect x="5" y="9" width="36" height="30" rx="7" fill="none" stroke="#2ee0c6" stroke-width="5"/><rect x="23" y="25" width="36" height="30" rx="7" fill="url(#lg1)"/><rect x="23" y="25" width="36" height="9" rx="4.5" fill="rgba(255,255,255,.28)"/></svg>
+      Twinbar
+    </a>
+    <nav class="navlinks" aria-label="Sections">
+      <a href="#play" data-i18n="nav.play">Try it</a>
+      <a href="#features" data-i18n="nav.features">Features</a>
+      <a href="#how" data-i18n="nav.how">How it works</a>
+      <a href="#proxy" data-i18n="nav.proxy">Proxy</a>
+      <a href="#download" data-i18n="nav.download">Download</a>
+      <a href="#faq" data-i18n="nav.faq">FAQ</a>
+    </nav>
+    <div class="navtools">
+      <button class="iconbtn" id="langBtn" type="button" aria-label="Language">فا</button>
+      <button class="iconbtn" id="themeBtn" type="button" aria-label="Theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+      <a class="iconbtn" href="https://github.com/sadrazkh/twinbar" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.56-.29-5.25-1.28-5.25-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.7 5.38-5.26 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z"/></svg>
+        <span id="stars">GitHub</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <!-- hero -->
+  <div class="hero">
+    <div class="wrap">
+      <span class="eyebrow"><span class="dot"></span><span data-i18n="hero.eyebrow">Free &amp; open source · for Windows 10 and 11</span></span>
+      <h1 data-i18n="hero.title">Two of every app.<br><span class="grad">One taskbar.</span></h1>
+      <p class="lead" data-i18n="hero.sub">Twinbar gives Slack, Claude, Postman, Discord and other Electron apps a second copy on Windows that signs in separately, with its own taskbar button, its own icon and its own data. The original app isn't touched.</p>
+      <div class="cta">
+        <a class="btn btn-primary" id="heroDl" href="https://github.com/sadrazkh/twinbar/releases/latest">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10 4.5v7H3zm8-1.15L21 3v8.5H11zM3 12.5h7v7L3 18.5zm8 0h10V21l-10-1.35z"/></svg>
+          <span data-i18n="hero.download">Download for Windows</span>
+        </a>
+        <a class="btn btn-ghost" href="#play">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
+          <span data-i18n="hero.try">Design a twin</span>
+        </a>
+      </div>
+      <div class="meta"><b id="heroVer">v0.9.0</b> · <span data-i18n="hero.meta">no admin rights · nothing injected · MIT licence</span></div>
+
+      <div class="stage reveal">
+        <div class="desk" id="desk" aria-label="An interactive Windows desktop with two copies of a chat app">
+          <div class="inner">
+            <div class="swirl"></div>
+
+            <div class="win personal" data-win="personal">
+              <div class="tbar"><img alt="" data-icon="orig"><span class="ttl">Chat · Home</span><div class="ctl"><span data-act="min">&#8212;</span><span>&#9633;</span><span class="x" data-act="close">&#10005;</span></div></div>
+              <div class="chat">
+                <div class="side">
+                  <div class="ws"><i style="background:#8b5cf6">H</i>Home</div>
+                  <div class="ch on"># family</div><div class="ch"># trips</div><div class="ch"># books</div>
+                  <div class="acct"><i style="background:#f97316">S</i>sara@home.example</div>
+                </div>
+                <div class="main">
+                  <div class="head"># family</div>
+                  <div class="msg"><i style="background:#ec4899">M</i><div><b>Mom</b><span>Dinner at eight tonight? 🍲</span></div></div>
+                  <div class="msg"><i style="background:#0ea5e9">A</i><div><b>Ali</b><span>Photos from the trip are up 📸</span></div></div>
+                  <div class="msg"><i style="background:#f97316">S</i><div><b>Sara</b><span>On my way! 🚗</span></div></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="win work top" data-win="work">
+              <div class="tbar"><img alt="" data-icon="twin"><span class="ttl">Chat Work · Acme</span><div class="ctl"><span data-act="min">&#8212;</span><span>&#9633;</span><span class="x" data-act="close">&#10005;</span></div></div>
+              <div class="chat">
+                <div class="side">
+                  <div class="ws"><i style="background:#12A594">A</i>Acme Inc</div>
+                  <div class="ch on"># launch</div><div class="ch"># design</div><div class="ch"># standup</div>
+                  <div class="acct"><i style="background:#3E63DD">S</i>sara@acme.example</div>
+                </div>
+                <div class="main">
+                  <div class="head"># launch</div>
+                  <div class="msg"><i style="background:#3E63DD">L</i><div><b>Lena</b><span>v2 ships Friday 🚀</span></div></div>
+                  <div class="msg"><i style="background:#D4A017">O</i><div><b>Omid</b><span>Can you review the new icons?</span></div></div>
+                  <div class="msg"><i style="background:#3E63DD">S</i><div><b>Sara</b><span>On it, from my work account ✅</span></div></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="win app closed" data-win="app">
+              <div class="tbar"><svg viewBox="0 0 64 64" width="18" height="18" aria-hidden="true"><rect x="5" y="9" width="36" height="30" rx="7" fill="none" stroke="#12A594" stroke-width="5"/><rect x="23" y="25" width="36" height="30" rx="7" fill="#7c5cff"/></svg><span class="ttl">Twinbar</span><div class="ctl"><span data-act="min">&#8212;</span><span>&#9633;</span><span class="x" data-act="close">&#10005;</span></div></div>
+              <div class="tw-list">
+                <div class="tw-row h"><span>Profile</span><span>Status</span><span>Icon</span></div>
+                <div class="tw-row sel"><span><img alt="" data-icon="twin">Chat Work</span><span>running</span><span>colour #12A594, badge W; via http://127.0.0.1:10809</span></div>
+                <div class="tw-row"><span><img alt="" data-icon="notes">Notes Test</span><span>ready</span><span>colour #F76B15, badge T; always dark</span></div>
+              </div>
+              <div class="tw-btns"><span>New profile...</span><span>Edit...</span><span>Open</span><span>Remove...</span><span>Repair</span><span>Check IP</span><span>Check all</span><span>More...</span></div>
+              <div class="tw-status"><span>2 profile(s). Double-click one to open it.</span><a id="twVer">Twinbar 0.9.0</a></div>
+            </div>
+
+            <div class="toast hide" id="toast"><b id="toastT"></b><span id="toastB"></span></div>
+
+            <div class="menu hide" id="trayMenu" role="menu">
+              <div class="mi b" data-m="open">Open Twinbar</div>
+              <div class="msep"></div>
+              <div class="mi" data-m="work"><img alt="" data-icon="twin">Chat Work<span class="n okn">running, proxy OK</span></div>
+              <div class="mi" data-m="notes"><img alt="" data-icon="notes">Notes Test<span class="n badn">proxy down</span></div>
+              <div class="msep"></div>
+              <div class="mi" data-m="startup"><span class="chk" id="chkStart">&#10003;</span>Start Twinbar when I sign in to Windows</div>
+              <div class="mi" data-m="tray"><span class="chk">&#10003;</span>Keep Twinbar by the clock when its window closes</div>
+              <div class="msep"></div>
+              <div class="mi" data-m="quit">Quit Twinbar</div>
+            </div>
+
+            <div class="start"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="#6ea8ff" d="M3 3h8.5v8.5H3zM12.5 3H21v8.5h-8.5zM3 12.5h8.5V21H3zM12.5 12.5H21V21h-8.5z"/></svg></div>
+            <div class="taskbar">
+              <div class="tbb open" data-tb="personal"><img alt="" data-icon="orig"><span class="tip">Chat</span></div>
+              <div class="tbb open active" data-tb="work"><img alt="" data-icon="twin"><span class="tip">Chat Work</span></div>
+              <div class="tbb hidden" data-tb="app"><svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b69cff"/><stop offset="1" stop-color="#2ee0c6"/></linearGradient></defs><rect x="5" y="9" width="36" height="30" rx="7" fill="none" stroke="#2ee0c6" stroke-width="5"/><rect x="23" y="25" width="36" height="30" rx="7" fill="url(#lg2)"/></svg><span class="tip">Twinbar</span></div>
+            </div>
+            <div class="tray">
+              <span style="opacity:.75">&#8963;</span>
+              <div class="ico" id="trayIco" title="Twinbar"><span class="pulse" id="pulse"></span><svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="lg3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b69cff"/><stop offset="1" stop-color="#2ee0c6"/></linearGradient></defs><rect x="5" y="9" width="36" height="30" rx="7" fill="none" stroke="#2ee0c6" stroke-width="6"/><rect x="23" y="25" width="36" height="30" rx="7" fill="url(#lg3)"/></svg></div>
+              <span style="opacity:.85">&#128246;</span>
+              <div class="clock"><div id="clockT">12:00</div><div id="clockD" style="opacity:.8">11/22/2026</div></div>
+            </div>
+          </div>
+        </div>
+        <p class="hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V11m0-1.5a1.5 1.5 0 0 1 3 0V11m0-.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-2.7L3.7 15a1.5 1.5 0 0 1 2.4-1.8L9 15"/></svg><span data-i18n="hero.hint">Try it: click the taskbar buttons, or the Twinbar icon by the clock.</span></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- apps -->
+  <div class="works">
+    <p data-i18n="works.title">Works with Electron apps such as</p>
+    <div class="marquee"><div class="track" id="track"></div></div>
+  </div>
+
+  <!-- playground -->
+  <section id="play">
+    <div class="wrap">
+      <div class="sh reveal">
+        <div class="kicker" data-i18n="play.kicker">Try it here</div>
+        <h2 data-i18n="play.title">Design your twin</h2>
+        <p data-i18n="play.sub">Pick a look. This is the icon Twinbar draws, and the command that makes the profile.</p>
+      </div>
+      <div class="play reveal">
+        <div class="card controls">
+          <div>
+            <span class="flabel" data-i18n="play.app">App</span>
+            <div class="apps" id="pgApps"></div>
+          </div>
+          <div class="row2">
+            <div class="field"><label for="pgName" data-i18n="play.name">Profile name</label><input type="text" id="pgName" value="Work" maxlength="40" autocomplete="off" dir="auto"></div>
+            <div class="field"><label for="pgBadge" data-i18n="play.badge">Badge</label><input type="text" id="pgBadge" maxlength="2" autocomplete="off" dir="auto" data-i18n-attr="placeholder:play.badgeHint" placeholder="1 or 2 letters"></div>
+          </div>
+          <div class="warnline" id="pgWarn"></div>
+          <div>
+            <span class="flabel"><span data-i18n="play.color">Colour</span> <span class="auto" id="pgAuto" data-i18n="play.auto">(picked from the name)</span></span>
+            <div class="swatches" id="pgSw"></div>
+          </div>
+          <div>
+            <span class="flabel" data-i18n="play.style">Icon style</span>
+            <div class="seg" id="pgStyle">
+              <button type="button" data-v="tint+badge" data-i18n="style.tb">Colour and badge</button>
+              <button type="button" data-v="tint" data-i18n="style.t">Colour only</button>
+              <button type="button" data-v="badge" data-i18n="style.b">Badge only</button>
+              <button type="button" data-v="original" data-i18n="style.o">The app's own</button>
+            </div>
+          </div>
+          <div>
+            <span class="flabel" data-i18n="play.appearance">Appearance</span>
+            <div class="seg" id="pgAppear">
+              <button type="button" data-v="system" data-i18n="ap.system">Same as Windows</button>
+              <button type="button" data-v="light" data-i18n="ap.light">Light</button>
+              <button type="button" data-v="dark" data-i18n="ap.dark">Dark</button>
+            </div>
+          </div>
+          <div class="row2" style="align-items:end">
+            <label class="switch"><input type="checkbox" id="pgProxyOn"><span class="knob"></span><span data-i18n="play.proxy">Through a proxy</span></label>
+            <input type="text" id="pgProxy" value="http://127.0.0.1:10809" autocomplete="off" aria-label="Proxy">
+          </div>
+        </div>
+        <div class="card preview">
+          <div class="bigicon"><img id="pgIcon" alt="The profile's icon"></div>
+          <div class="minis">
+            <div class="mini"><span class="flabel" data-i18n="play.start">Start menu</span><div class="startitem"><img id="pgStartIcon" alt=""><div><span id="pgStartName">Slack Work</span><small>Twinbar profile</small></div></div></div>
+            <div class="mini"><span class="flabel" data-i18n="play.taskbar">Taskbar</span><div class="minitb"><div><img id="pgOrig" alt=""><span data-i18n="play.orig">original</span></div><div><img id="pgTwin" alt=""><span data-i18n="play.twin">twin</span></div></div></div>
+          </div>
+          <div class="cmd" id="pgCmd"><button class="copy" type="button" data-copy="pgCmdText" data-i18n="copy">Copy</button><code id="pgCmdText"></code></div>
+          <div class="idline"><span data-i18n="play.id">Profile id:</span> <code id="pgId">slack.work</code> · <span data-i18n="play.or">or in the Twinbar window: New profile...</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- features -->
+  <section id="features">
+    <div class="wrap">
+      <div class="sh reveal">
+        <div class="kicker" data-i18n="feat.kicker">Features</div>
+        <h2 data-i18n="feat.title">Everything for more than one account</h2>
+        <p data-i18n="feat.sub">From a second sign-in to a proxy with a kill switch, backups and updates that install themselves.</p>
+      </div>
+      <div class="grid" id="featGrid"></div>
+    </div>
+  </section>
+
+  <!-- how -->
+  <section id="how">
+    <div class="wrap">
+      <div class="sh reveal">
+        <div class="kicker" data-i18n="how.kicker">Under the hood</div>
+        <h2 data-i18n="how.title">Simple, and the app stays untouched</h2>
+        <p data-i18n="how.sub">No patching, no injecting, no re-signing. Just the right switches and a window property.</p>
+      </div>
+      <div class="steps">
+        <div class="card step reveal"><div class="num">1</div><h3 data-i18n="how.s1t">A Start menu entry</h3><p data-i18n="how.s1d">“Slack Work” starts Twinbar's tiny launcher with the profile's id.</p><div class="art"><span class="p">Slack Work.lnk</span> → twinbar-launcher.exe <span class="v">slack.work</span></div></div>
+        <div class="card step reveal"><div class="num">2</div><h3 data-i18n="how.s2t">The same app, its own folder</h3><p data-i18n="how.s2d">The launcher starts the installed app with its data folder pointed at the profile's own, plus its proxy and appearance.</p><div class="art">slack.exe <span class="k">--user-data-dir</span>=<span class="v">"...\Twinbar\data\slack\work"</span> <span class="k">--proxy-server</span>=<span class="v">http://127.0.0.1:10809</span></div></div>
+        <div class="card step reveal"><div class="num">3</div><h3 data-i18n="how.s3t">A taskbar button of its own</h3><p data-i18n="how.s3d">It puts the profile's AppUserModelID and icon on the app's windows, so Windows gives it a button of its own.</p><div class="art">AppUserModelID = <span class="v">Twinbar.slack.work</span></div></div>
+      </div>
+      <p class="note reveal" data-i18n="how.note">Measured with UI Automation on real apps: an ID set on the window wins over anything given at start-up.</p>
+    </div>
+  </section>
+
+  <!-- proxy -->
+  <section id="proxy">
+    <div class="wrap">
+      <div class="sh reveal">
+        <div class="kicker" data-i18n="px.kicker">Privacy</div>
+        <h2 data-i18n="px.title">A proxy for each profile, with a kill switch</h2>
+        <p data-i18n="px.sub">Send your work profile through your VPN's local proxy and keep the other one direct.</p>
+      </div>
+      <div class="proxy">
+        <div class="card txt reveal">
+          <ul class="bul">
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg><span data-i18n="px.b1"><b>Strict.</b> Chromium never falls back to a direct connection.</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg><span data-i18n="px.b2"><b>No DNS leaks.</b> Names are looked up through the proxy.</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg><span data-i18n="px.b3"><b>No WebRTC leaks.</b> UDP can't go around the proxy.</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg><span data-i18n="px.b4"><b>Finds your proxy.</b> v2rayN, Clash, NekoRay, sing-box, Hiddify... and tries each one.</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg><span data-i18n="px.b5"><b>Checks your IP.</b> See the address, place and network the world sees.</span></li>
+          </ul>
+          <div class="tipbox" data-i18n="px.tip">💡 Prefer your proxy's HTTP address: some apps' own code (Claude's, for one) can't use SOCKS outside Chromium.</div>
+        </div>
+        <div class="card viz reveal" id="viz">
+          <div class="ctrlrow">
+            <label class="switch"><input type="checkbox" id="pxUp" checked><span class="knob"></span><span id="pxLbl" data-i18n="px.up">Proxy is up</span></label>
+            <span class="small mono">twinbar ip "Slack Work"</span>
+          </div>
+          <svg viewBox="0 0 720 240" role="img" aria-label="Traffic from the profile goes through the proxy to the internet">
+            <defs><linearGradient id="wireg" x1="0" x2="1"><stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#14b8a6"/></linearGradient></defs>
+            <path class="bypass" d="M110 160 Q360 238 610 160"/>
+            <g transform="translate(360 214)"><circle r="15" fill="var(--bad)" opacity=".9"/><path d="M-6 -6 6 6M6 -6 -6 6" stroke="#fff" stroke-width="3" stroke-linecap="round"/></g>
+            <text x="360" y="186" text-anchor="middle" class="vsub" data-i18n="px.nobypass">no way around it</text>
+            <path id="pw1" class="wire live" d="M180 100 L290 100"/>
+            <path id="pw2" class="wire live w2" d="M430 100 L540 100"/>
+            <rect class="node" x="30" y="58" width="150" height="84" rx="16"/>
+            <image id="vizIcon" x="44" y="76" width="44" height="44"/>
+            <text x="96" y="96" class="vlabel">Slack Work</text>
+            <text x="96" y="116" class="vsub" data-i18n="px.profile">profile</text>
+            <rect class="node" x="290" y="58" width="140" height="84" rx="16"/>
+            <text x="360" y="94" text-anchor="middle" class="vlabel" data-i18n="px.proxy">Proxy</text>
+            <text x="360" y="116" text-anchor="middle" class="vsub">127.0.0.1:10809</text>
+            <g class="x" transform="translate(430 64)"><circle r="16" fill="var(--bad)"/><path d="M-6 -6 6 6M6 -6 -6 6" stroke="#fff" stroke-width="3" stroke-linecap="round"/></g>
+            <g class="globe" transform="translate(610 100)">
+              <circle r="48" class="node"/>
+              <g fill="none" stroke="var(--teal)" stroke-width="2.2"><circle r="24"/><ellipse rx="11" ry="24"/><path d="M-24 0H24M-21 -11H21M-21 11H21"/></g>
+              <text y="72" text-anchor="middle" class="vlabel" data-i18n="px.net">Internet</text>
+            </g>
+            <g class="p1"><circle class="pkt p1" r="6"><animateMotion dur="1.6s" repeatCount="indefinite" path="M180 100 L290 100"/></circle><circle class="pkt p1" r="6"><animateMotion dur="1.6s" begin="0.8s" repeatCount="indefinite" path="M180 100 L290 100"/></circle></g>
+            <g class="p2"><circle class="pkt" r="6"><animateMotion dur="1.6s" begin="0.4s" repeatCount="indefinite" path="M430 100 L540 100"/></circle><circle class="pkt" r="6"><animateMotion dur="1.6s" begin="1.2s" repeatCount="indefinite" path="M430 100 L540 100"/></circle></g>
+          </svg>
+          <div class="status" id="pxStatus"><span class="led"></span><span id="pxText"></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- terminal -->
+  <section id="cli">
+    <div class="wrap">
+      <div class="sh reveal">
+        <div class="kicker" data-i18n="cli.kicker">For terminal people</div>
+        <h2 data-i18n="cli.title">All of it from the command line too</h2>
+        <p data-i18n="cli.sub">The window and the commands share the same code. Script it, automate it, or just type.</p>
+      </div>
+      <div class="term reveal">
+        <div class="bar">
+          <div class="dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+          <div class="tabs" role="tablist" id="tabs"></div>
+        </div>
+        <pre id="termOut" aria-live="polite"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- download -->
+  <section id="download">
+    <div class="wrap">
+      <div class="sh reveal">
+        <div class="kicker" data-i18n="dl.kicker">Download</div>
+        <h2 data-i18n="dl.title">Get Twinbar</h2>
+        <p data-i18n="dl.sub">One installer, for you only, without admin rights. From then on it updates itself.</p>
+      </div>
+      <div class="dl">
+        <div class="card dlmain reveal">
+          <div class="ver"><span class="big" id="dlVer">0.9.0</span><span class="when" id="dlWhen"></span></div>
+          <ol class="ol">
+            <li><span data-i18n="dl.s1">Download the installer and run it. It installs Twinbar for you only, with no admin rights.</span></li>
+            <li><span data-i18n="dl.s2">Windows may say “Windows protected your PC”: click More info, then Run anyway. (It isn't code-signed yet.)</span></li>
+            <li><span data-i18n="dl.s3">Open Twinbar from the Start menu and click New profile.</span></li>
+          </ol>
+          <div class="linkrow">
+            <a class="btn btn-primary" id="dlSetup" href="https://github.com/sadrazkh/twinbar/releases/latest"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 20h16"/></svg><span><span data-i18n="dl.btn">Download the installer</span> <span id="dlSize" class="small" style="color:rgba(255,255,255,.75)"></span></span></a>
+            <a class="btn btn-ghost" id="dlNotes" href="https://github.com/sadrazkh/twinbar/releases/latest" data-i18n="dl.notes">What's new</a>
+          </div>
+        </div>
+        <div class="card dlside reveal">
+          <h3 data-i18n="dl.other">Other ways</h3>
+          <div><span class="flabel" data-i18n="dl.scoop">With Scoop</span><div class="cmd"><button class="copy" type="button" data-copy="scoopCmd" data-i18n="copy">Copy</button><code id="scoopCmd"><span class="p">scoop</span> install https://github.com/sadrazkh/twinbar/releases/latest/download/twinbar.json</code></div></div>
+          <div><span class="flabel" data-i18n="dl.verify">Check the download</span><div class="cmd"><code id="verifyCmd"><span class="c"># SHA256SUMS lists every file</span>
+(<span class="p">Get-FileHash</span> .\<span class="v" id="vfFile">Twinbar-Setup-0.9.0.exe</span>).Hash
+<span class="p">gh</span> attestation verify .\<span class="v" id="vfFile2">Twinbar-Setup-0.9.0.exe</span> <span class="k">-R</span> sadrazkh/twinbar</code></div></div>
+          <div class="req"><span data-i18n="dl.r1">Windows 10 or 11</span><span data-i18n="dl.r2">No admin rights</span><span data-i18n="dl.r3">Electron apps</span><span data-i18n="dl.r4">~2 MB</span></div>
+          <p class="small" data-i18n="dl.zip">Prefer a zip? Each release has twinbar-x.y.z.zip: unpack it and run .\twinbar.cmd install.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- news -->
+  <section id="news">
+    <div class="wrap">
+      <div class="sh reveal">
+        <div class="kicker" data-i18n="news.kicker">Releases</div>
+        <h2 data-i18n="news.title">A step further with every version</h2>
+      </div>
+      <div class="news" id="newsGrid"></div>
+      <div class="center"><a class="btn btn-ghost" href="https://github.com/sadrazkh/twinbar/releases" data-i18n="news.all">All releases</a></div>
+    </div>
+  </section>
+
+  <!-- faq -->
+  <section id="faq">
+    <div class="wrap">
+      <div class="sh reveal">
+        <div class="kicker" data-i18n="faq.kicker">Questions</div>
+        <h2 data-i18n="faq.title">Good to know</h2>
+      </div>
+      <div class="faq reveal" id="faqList"></div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <div class="card closing reveal">
+      <h2 data-i18n="end.title">Ready for your second account?</h2>
+      <p class="lead" data-i18n="end.sub">Install in a minute. Your original app stays exactly as it is.</p>
+      <div class="cta"><a class="btn btn-primary" href="#download" data-i18n="end.btn">Download Twinbar</a><a class="btn btn-ghost" href="https://github.com/sadrazkh/twinbar" target="_blank" rel="noopener" data-i18n="end.star">Star it on GitHub ★</a></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div><b style="color:var(--text)">Twinbar</b> · <span data-i18n="foot.made">Made for people with more than one account. MIT licence.</span> <span data-i18n="foot.ins">Inspired by DoppelDock on macOS.</span></div>
+    <nav>
+      <a href="https://github.com/sadrazkh/twinbar">GitHub</a>
+      <a href="https://github.com/sadrazkh/twinbar/releases" data-i18n="foot.rel">Releases</a>
+      <a href="https://github.com/sadrazkh/twinbar/blob/main/CHANGELOG.md" data-i18n="foot.log">Changelog</a>
+      <a href="https://github.com/sadrazkh/twinbar/blob/main/SECURITY.md" data-i18n="foot.sec">Security</a>
+      <a href="https://github.com/sadrazkh/twinbar/issues" data-i18n="foot.iss">Report a problem</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  var store = {
+    get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  };
+  var reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var REPO = 'sadrazkh/twinbar';
+
+  /* ------------------------------------------------------------------ text */
+  var T = {
+    en: {
+      'nav.play': 'Try it', 'nav.features': 'Features', 'nav.how': 'How it works', 'nav.proxy': 'Proxy', 'nav.download': 'Download', 'nav.faq': 'FAQ',
+      'hero.eyebrow': 'Free &amp; open source · for Windows 10 and 11',
+      'hero.title': 'Two of every app.<br><span class="grad">One taskbar.</span>',
+      'hero.sub': 'Twinbar gives Slack, Claude, Postman, Discord and other Electron apps a second copy on Windows that signs in separately, with its own taskbar button, its own icon and its own data. The original app isn\'t touched.',
+      'hero.download': 'Download for Windows', 'hero.try': 'Design a twin',
+      'hero.meta': 'no admin rights · nothing injected · MIT licence',
+      'hero.hint': 'Try it: click the taskbar buttons, or the Twinbar icon by the clock.',
+      'works.title': 'Works with Electron apps such as',
+      'play.kicker': 'Try it here', 'play.title': 'Design your twin',
+      'play.sub': 'Pick a look. This is the icon Twinbar draws, and the command that makes the profile.',
+      'play.app': 'App', 'play.name': 'Profile name', 'play.badge': 'Badge', 'play.badgeHint': 'first letter of the name',
+      'play.color': 'Colour', 'play.auto': '(picked from the name)', 'play.style': 'Icon style', 'play.appearance': 'Appearance',
+      'style.tb': 'Colour and badge', 'style.t': 'Colour only', 'style.b': 'Badge only', 'style.o': 'The app\'s own',
+      'ap.system': 'Same as Windows', 'ap.light': 'Light', 'ap.dark': 'Dark',
+      'play.proxy': 'Through a proxy', 'play.start': 'Start menu', 'play.taskbar': 'Taskbar', 'play.orig': 'original', 'play.twin': 'twin',
+      'play.id': 'Profile id:', 'play.or': 'or in the Twinbar window: New profile...',
+      'play.badName': 'A name uses letters, digits, spaces, “.”, “_” and “-”, starts and ends with a letter or digit, and has at most 40 characters.',
+      'copy': 'Copy', 'copied': 'Copied!', 'new': 'NEW',
+      'feat.kicker': 'Features', 'feat.title': 'Everything for more than one account',
+      'feat.sub': 'From a second sign-in to a proxy with a kill switch, backups and updates that install themselves.',
+      'how.kicker': 'Under the hood', 'how.title': 'Simple, and the app stays untouched',
+      'how.sub': 'No patching, no injecting, no re-signing. Just the right switches and a window property.',
+      'how.s1t': 'A Start menu entry', 'how.s1d': '“Slack Work” starts Twinbar\'s tiny launcher with the profile\'s id.',
+      'how.s2t': 'The same app, its own folder', 'how.s2d': 'The launcher starts the installed app with its data folder pointed at the profile\'s own, plus its proxy and appearance.',
+      'how.s3t': 'A taskbar button of its own', 'how.s3d': 'It puts the profile\'s AppUserModelID and icon on the app\'s windows, so Windows gives it a button of its own.',
+      'how.note': 'Measured with UI Automation on real apps: an ID set on the window wins over anything given at start-up.',
+      'px.kicker': 'Privacy', 'px.title': 'A proxy for each profile, with a kill switch',
+      'px.sub': 'Send your work profile through your VPN\'s local proxy and keep the other one direct.',
+      'px.b1': '<b>Strict.</b> Chromium never falls back to a direct connection.',
+      'px.b2': '<b>No DNS leaks.</b> Names are looked up through the proxy.',
+      'px.b3': '<b>No WebRTC leaks.</b> UDP can\'t go around the proxy.',
+      'px.b4': '<b>Finds your proxy.</b> v2rayN, Clash, NekoRay, sing-box, Hiddify... and tries each one.',
+      'px.b5': '<b>Checks your IP.</b> See the address, place and network the world sees.',
+      'px.tip': '💡 Prefer your proxy\'s HTTP address: some apps\' own code (Claude\'s, for one) can\'t use SOCKS outside Chromium.',
+      'px.up': 'Proxy is up', 'px.down': 'Proxy is down',
+      'px.stUp': 'Traffic goes through the proxy. The world sees <b class="mono">203.0.113.7</b> · Frankfurt.',
+      'px.stDown': 'The proxy is down, so the profile is offline. Nothing goes around it.',
+      'px.profile': 'profile', 'px.proxy': 'Proxy', 'px.net': 'Internet', 'px.nobypass': 'no way around it',
+      'cli.kicker': 'For terminal people', 'cli.title': 'All of it from the command line too',
+      'cli.sub': 'The window and the commands share the same code. Script it, automate it, or just type.',
+      'dl.kicker': 'Download', 'dl.title': 'Get Twinbar', 'dl.sub': 'One installer, for you only, without admin rights. From then on it updates itself.',
+      'dl.s1': 'Download the installer and run it. It installs Twinbar for you only, with no admin rights.',
+      'dl.s2': 'Windows may say “Windows protected your PC”: click <b>More info</b>, then <b>Run anyway</b>. (It isn\'t code-signed yet.)',
+      'dl.s3': 'Open <b>Twinbar</b> from the Start menu and click <b>New profile...</b>',
+      'dl.btn': 'Download the installer', 'dl.notes': 'What\'s new', 'dl.other': 'Other ways', 'dl.scoop': 'With Scoop', 'dl.verify': 'Check the download',
+      'dl.r1': 'Windows 10 or 11', 'dl.r2': 'No admin rights', 'dl.r3': 'Electron apps', 'dl.r4': 'Tiny download',
+      'dl.zip': 'Prefer a zip? Each release has <code>twinbar-x.y.z.zip</code>: unpack it and run <code>.\\twinbar.cmd install</code>.',
+      'dl.released': 'released', 'dl.latest': 'latest',
+      'news.kicker': 'Releases', 'news.title': 'A step further with every version', 'news.all': 'All releases',
+      'faq.kicker': 'Questions', 'faq.title': 'Good to know',
+      'end.title': 'Ready for your second account?', 'end.sub': 'Install in a minute. Your original app stays exactly as it is.',
+      'end.btn': 'Download Twinbar', 'end.star': 'Star it on GitHub ★',
+      'foot.made': 'Made for people with more than one account. MIT licence.', 'foot.ins': 'Inspired by DoppelDock on macOS.',
+      'foot.rel': 'Releases', 'foot.log': 'Changelog', 'foot.sec': 'Security', 'foot.iss': 'Report a problem',
+      'toast.notesT': 'Notes Test is offline', 'toast.notesB': 'Its proxy is down, and the kill switch keeps it from going around it.',
+      'toast.hideT': 'Twinbar is still here', 'toast.hideB': 'Click its icon for the window, or right-click it for your profiles.',
+      'toast.quitT': 'Twinbar quit', 'toast.quitB': 'Your profiles keep working from the Start menu.',
+      'toast.startT': 'Start with Windows', 'toast.startOn': 'Twinbar will be by the clock when you sign in.', 'toast.startOff': 'Twinbar won\'t start with Windows.'
+    },
+    fa: {
+      'nav.play': 'امتحانش کن', 'nav.features': 'امکانات', 'nav.how': 'چطور کار می‌کند', 'nav.proxy': 'پروکسی', 'nav.download': 'دانلود', 'nav.faq': 'پرسش‌ها',
+      'hero.eyebrow': 'رایگان و متن‌باز · برای ویندوز ۱۰ و ۱۱',
+      'hero.title': 'هر برنامه، دو نسخه.<br><span class="grad">کنار هم روی یک تسک‌بار.</span>',
+      'hero.sub': 'Twinbar به Slack، Claude، Postman، Discord و بقیه‌ی برنامه‌های الکترونی روی ویندوز یک نسخه‌ی دوم می‌دهد که جدا لاگین می‌شود؛ با دکمه‌ی تسک‌بار، آیکن و اطلاعات مخصوص خودش. به برنامه‌ی اصلی هیچ دستی نمی‌خورد.',
+      'hero.download': 'دانلود برای ویندوز', 'hero.try': 'یک دوقلو بساز',
+      'hero.meta': 'بدون نیاز به ادمین · بدون تزریق کد · مجوز MIT',
+      'hero.hint': 'امتحانش کن: روی دکمه‌های تسک‌بار کلیک کن، یا روی آیکن Twinbar کنار ساعت.',
+      'works.title': 'با برنامه‌های الکترونی کار می‌کند، مثل',
+      'play.kicker': 'همین‌جا امتحان کن', 'play.title': 'دوقلوی خودت را بساز',
+      'play.sub': 'یک ظاهر انتخاب کن. Twinbar دقیقاً همین آیکن را می‌کشد، و این هم دستوری است که پروفایل را می‌سازد.',
+      'play.app': 'برنامه', 'play.name': 'اسم پروفایل', 'play.badge': 'نشان', 'play.badgeHint': 'حرف اول اسم',
+      'play.color': 'رنگ', 'play.auto': '(خودکار از روی اسم)', 'play.style': 'سبک آیکن', 'play.appearance': 'ظاهر',
+      'style.tb': 'رنگ و نشان', 'style.t': 'فقط رنگ', 'style.b': 'فقط نشان', 'style.o': 'آیکن خود برنامه',
+      'ap.system': 'مثل ویندوز', 'ap.light': 'روشن', 'ap.dark': 'تیره',
+      'play.proxy': 'از طریق پروکسی', 'play.start': 'منوی استارت', 'play.taskbar': 'تسک‌بار', 'play.orig': 'اصلی', 'play.twin': 'دوقلو',
+      'play.id': 'شناسه‌ی پروفایل:', 'play.or': 'یا در پنجره‌ی Twinbar: «New profile...»',
+      'play.badName': 'اسم می‌تواند حرف، عدد، فاصله، «.»، «_» و «-» داشته باشد، با حرف یا عدد شروع و تمام شود و حداکثر ۴۰ حرف باشد.',
+      'copy': 'کپی', 'copied': 'کپی شد!', 'new': 'جدید',
+      'feat.kicker': 'امکانات', 'feat.title': 'هر چیزی که برای چند حساب کاربری لازم داری',
+      'feat.sub': 'از لاگین دوم تا پروکسی با کیل‌سوییچ، بکاپ، و آپدیتی که خودش نصب می‌شود.',
+      'how.kicker': 'پشت صحنه', 'how.title': 'ساده، و برنامه دست‌نخورده می‌ماند',
+      'how.sub': 'بدون پچ، بدون تزریق کد، بدون امضای دوباره. فقط سوییچ‌های درست و یک ویژگی روی پنجره.',
+      'how.s1t': 'یک میانبر در منوی استارت', 'how.s1d': '«Slack Work» لانچر کوچک Twinbar را با شناسه‌ی پروفایل اجرا می‌کند.',
+      'how.s2t': 'همان برنامه، با پوشه‌ی خودش', 'how.s2d': 'لانچر برنامه‌ی نصب‌شده را با پوشه‌ی داده‌ی مخصوص پروفایل اجرا می‌کند، به‌اضافه‌ی پروکسی و ظاهرش.',
+      'how.s3t': 'دکمه‌ی تسک‌بار خودش', 'how.s3d': 'شناسه‌ی AppUserModelID و آیکن پروفایل را روی پنجره‌های برنامه می‌گذارد تا ویندوز به آن دکمه‌ی جدا بدهد.',
+      'how.note': 'روی برنامه‌های واقعی با UI Automation اندازه گرفته شده: شناسه‌ای که روی پنجره گذاشته شود از هر چیزی که موقع اجرا داده شود قوی‌تر است.',
+      'px.kicker': 'حریم خصوصی', 'px.title': 'پروکسی جدا برای هر پروفایل، با کیل‌سوییچ',
+      'px.sub': 'پروفایل کاری را از پروکسی محلیِ VPN رد کن و بقیه را مستقیم بگذار.',
+      'px.b1': '<b>سخت‌گیر.</b> کرومیوم هیچ‌وقت سراغ اتصال مستقیم نمی‌رود.',
+      'px.b2': '<b>بدون نشت DNS.</b> آدرس‌ها از طریق خود پروکسی پیدا می‌شوند.',
+      'px.b3': '<b>بدون نشت WebRTC.</b> ترافیک UDP نمی‌تواند پروکسی را دور بزند.',
+      'px.b4': '<b>پروکسی‌ات را پیدا می‌کند.</b> v2rayN، Clash، NekoRay، sing-box، Hiddify و... و هرکدام را امتحان می‌کند.',
+      'px.b5': '<b>آی‌پی را چک می‌کند.</b> آدرس، مکان و شبکه‌ای که دنیا می‌بیند.',
+      'px.tip': '💡 آدرس HTTP پروکسی را ترجیح بده: کد خود بعضی برنامه‌ها (مثلاً Claude) بیرون از کرومیوم با SOCKS کار نمی‌کند.',
+      'px.up': 'پروکسی وصل است', 'px.down': 'پروکسی قطع است',
+      'px.stUp': 'ترافیک از پروکسی رد می‌شود. دنیا این را می‌بیند: <b class="mono">203.0.113.7</b> · فرانکفورت',
+      'px.stDown': 'پروکسی قطع است، پس پروفایل آفلاین است. هیچ چیزی دورش نمی‌زند.',
+      'px.profile': 'پروفایل', 'px.proxy': 'پروکسی', 'px.net': 'اینترنت', 'px.nobypass': 'راه دور زدن ندارد',
+      'cli.kicker': 'برای ترمینال‌دوست‌ها', 'cli.title': 'همه‌چیز از خط فرمان هم',
+      'cli.sub': 'پنجره و دستورها از یک کد استفاده می‌کنند. اسکریپتش کن، خودکارش کن، یا فقط تایپ کن.',
+      'dl.kicker': 'دانلود', 'dl.title': 'Twinbar را بگیر', 'dl.sub': 'یک نصب‌کننده، فقط برای خودت و بدون ادمین. از آن به بعد خودش آپدیت می‌شود.',
+      'dl.s1': 'نصب‌کننده را دانلود و اجرا کن. Twinbar فقط برای خودت نصب می‌شود و ادمین نمی‌خواهد.',
+      'dl.s2': 'شاید ویندوز بگوید «Windows protected your PC»: روی <b>More info</b> و بعد <b>Run anyway</b> بزن. (هنوز امضای کد ندارد.)',
+      'dl.s3': '<b>Twinbar</b> را از منوی استارت باز کن و <b>New profile...</b> را بزن.',
+      'dl.btn': 'دانلود نصب‌کننده', 'dl.notes': 'تازه‌ها', 'dl.other': 'راه‌های دیگر', 'dl.scoop': 'با Scoop', 'dl.verify': 'سالم بودن فایل را چک کن',
+      'dl.r1': 'ویندوز ۱۰ یا ۱۱', 'dl.r2': 'بدون ادمین', 'dl.r3': 'برنامه‌های الکترونی', 'dl.r4': 'حجم خیلی کم',
+      'dl.zip': 'zip را ترجیح می‌دهی؟ هر نسخه یک <code>twinbar-x.y.z.zip</code> دارد: بازش کن و <code>.\\twinbar.cmd install</code> را اجرا کن.',
+      'dl.released': 'منتشرشده در', 'dl.latest': 'آخرین',
+      'news.kicker': 'نسخه‌ها', 'news.title': 'هر نسخه، یک قدم جلوتر', 'news.all': 'همه‌ی نسخه‌ها',
+      'faq.kicker': 'پرسش‌ها', 'faq.title': 'خوب است بدانی',
+      'end.title': 'آماده‌ی حساب دومت هستی؟', 'end.sub': 'در یک دقیقه نصب می‌شود. برنامه‌ی اصلی‌ات دقیقاً همان‌طور که هست می‌ماند.',
+      'end.btn': 'دانلود Twinbar', 'end.star': 'در گیت‌هاب ستاره بده ★',
+      'foot.made': 'ساخته‌شده برای کسانی که بیشتر از یک حساب دارند. مجوز MIT.', 'foot.ins': 'الهام‌گرفته از DoppelDock روی مک.',
+      'foot.rel': 'نسخه‌ها', 'foot.log': 'تغییرات', 'foot.sec': 'امنیت', 'foot.iss': 'گزارش مشکل',
+      'toast.notesT': 'Notes Test آفلاین است', 'toast.notesB': 'پروکسی‌اش قطع است و کیل‌سوییچ نمی‌گذارد دورش بزند.',
+      'toast.hideT': 'Twinbar هنوز این‌جاست', 'toast.hideB': 'برای پنجره روی آیکنش کلیک کن، یا برای پروفایل‌ها راست‌کلیک.',
+      'toast.quitT': 'Twinbar بسته شد', 'toast.quitB': 'پروفایل‌ها از منوی استارت همچنان کار می‌کنند.',
+      'toast.startT': 'اجرا با ویندوز', 'toast.startOn': 'وقتی وارد ویندوز شوی، Twinbar کنار ساعت است.', 'toast.startOff': 'Twinbar دیگر با ویندوز اجرا نمی‌شود.'
+    }
+  };
+
+  var FEATURES = [
+    { i: '👯', g: 'rgba(139,92,246,.25)', en: ['Its own sign-in', 'Each profile keeps its sign-in, settings and data in a folder of its own. Sign in to a second account and both stay signed in.'], fa: ['لاگین جدا', 'هر پروفایل لاگین، تنظیمات و داده‌هایش را در پوشه‌ی خودش نگه می‌دارد. با حساب دوم وارد شو؛ هر دو لاگین می‌مانند.'] },
+    { i: '📌', g: 'rgba(59,130,246,.25)', en: ['Its own taskbar button', 'A tiny launcher tags the app\'s windows with the profile\'s ID, so it gets a button of its own. Pin it like any other.'], fa: ['دکمه‌ی تسک‌بار جدا', 'یک لانچر کوچک شناسه‌ی پروفایل را روی پنجره‌های برنامه می‌گذارد تا دکمه‌ی خودش را بگیرد. مثل بقیه پینش کن.'] },
+    { i: '🎨', g: 'rgba(236,72,153,.22)', en: ['Its own icon', 'Recoloured, with a letter badge, or both, so you can tell the copies apart at a glance.'], fa: ['آیکن جدا', 'رنگ‌شده، با نشان حرفی، یا هر دو؛ تا نسخه‌ها را با یک نگاه از هم تشخیص بدهی.'] },
+    { i: '🏪', g: 'rgba(20,184,166,.25)', en: ['Store apps too', 'Normal installs, Squirrel installs (Slack, Discord, Postman) and Microsoft Store apps such as Claude.'], fa: ['برنامه‌های استور هم', 'نصب‌های معمولی، نصب‌های Squirrel (مثل Slack، Discord و Postman) و برنامه‌های مایکروسافت استور مثل Claude.'] },
+    { i: '🛡️', g: 'rgba(34,197,94,.22)', en: ['Proxy with a kill switch', 'Send one profile through your VPN\'s proxy. If the proxy goes down, the profile goes offline instead of around it.'], fa: ['پروکسی با کیل‌سوییچ', 'یک پروفایل را از پروکسی VPN رد کن. اگر پروکسی قطع شود، پروفایل آفلاین می‌شود، نه این‌که دورش بزند.'] },
+    { i: '🔎', g: 'rgba(245,158,11,.22)', en: ['IP check and proxy finder', 'See which IP the world sees for each profile, and find the proxies running on your computer.'], fa: ['چک آی‌پی و پیدا کردن پروکسی', 'ببین دنیا برای هر پروفایل چه آی‌پی‌ای می‌بیند، و پروکسی‌های روشن روی کامپیوترت را پیدا کن.'] },
+    { i: '🕒', g: 'rgba(96,165,250,.25)', n: 1, en: ['By the clock', 'Right-click the tray icon for your profiles, which ones are running and whether each proxy is up. Starts with Windows if you like.'], fa: ['کنار ساعت', 'روی آیکن کنار ساعت راست‌کلیک کن: پروفایل‌ها، کدام روشن‌اند و پروکسی هرکدام وصل است یا نه. اگر بخواهی با ویندوز بالا می‌آید.'] },
+    { i: '🔄', g: 'rgba(167,139,250,.25)', n: 1, en: ['Updates itself', 'Tells you when a new version is out, checks the download\'s SHA-256 and installs it in one click.'], fa: ['خودش آپدیت می‌شود', 'نسخه‌ی جدید که بیاید خبرت می‌کند، SHA-256 فایل را چک می‌کند و با یک کلیک نصبش می‌کند.'] },
+    { i: '💾', g: 'rgba(46,224,198,.22)', n: 1, en: ['Backup and restore', 'A profile\'s settings and sign-in in one zip. Restore it later, on another PC, or next to the original.'], fa: ['بکاپ و بازگردانی', 'تنظیمات و لاگین یک پروفایل در یک فایل zip؛ بعداً، روی کامپیوتر دیگر یا کنار نسخه‌ی اصلی برش گردان.'] },
+    { i: '🧹', g: 'rgba(244,114,182,.22)', n: 1, en: ['Cache cleaner', 'See what each profile takes and clear its cache. The sign-in stays.'], fa: ['پاک‌کردن کش', 'ببین هر پروفایل چقدر جا گرفته و کشش را پاک کن. لاگین سر جایش می‌ماند.'] },
+    { i: '⌨️', g: 'rgba(99,102,241,.25)', en: ['A window, or the command line', 'Everything in a friendly window, and the same in a terminal: new, change, doctor, backup, update...'], fa: ['پنجره یا خط فرمان', 'همه‌چیز در یک پنجره‌ی ساده، و همان در ترمینال: new، change، doctor، backup، update و...'] },
+    { i: '🔒', g: 'rgba(148,163,184,.25)', en: ['Nothing injected', 'No admin rights, no patching or re-signing apps. One PowerShell script you can read, compiled on your PC.'], fa: ['بدون تزریق کد', 'بدون ادمین، بدون پچ یا امضای دوباره‌ی برنامه‌ها. یک اسکریپت PowerShell که می‌توانی بخوانی‌اش، روی کامپیوتر خودت کامپایل می‌شود.'] }
+  ];
+
+  var FAQ = [
+    { en: ['Does it change the app?', 'No. Twinbar starts the installed app with a data folder of its own and sets window properties from outside. Nothing is injected, patched or re-signed, and the original app keeps working exactly as before.'],
+      fa: ['برنامه را تغییر می‌دهد؟', 'نه. Twinbar برنامه‌ی نصب‌شده را با پوشه‌ی داده‌ی جدا اجرا می‌کند و از بیرون چند ویژگی روی پنجره‌اش می‌گذارد. نه کدی تزریق می‌شود، نه پچی، نه امضای دوباره؛ برنامه‌ی اصلی دقیقاً مثل قبل کار می‌کند.'] },
+    { en: ['Which apps work?', 'Apps built on Electron: Slack, Discord, Postman, Bruno, Cursor, VS Code, Figma, Signal, MongoDB Compass, Obsidian, Claude from the Microsoft Store and many more. <code>twinbar apps</code> lists the ones it finds on your PC.'],
+      fa: ['با چه برنامه‌هایی کار می‌کند؟', 'برنامه‌هایی که روی Electron ساخته شده‌اند: Slack، Discord، Postman، Bruno، Cursor، VS Code، Figma، Signal، MongoDB Compass، Obsidian، Claude از مایکروسافت استور و خیلی‌های دیگر. دستور <code>twinbar apps</code> آن‌هایی را که روی کامپیوترت پیدا می‌کند نشان می‌دهد.'] },
+    { en: ['Will my sign-in survive app updates?', 'Yes. Squirrel apps\' updates are followed, Store apps are found by their package, and Repair fixes a profile if the app moved. The sign-in lives in the profile\'s own folder.'],
+      fa: ['با آپدیت برنامه لاگینم می‌پرد؟', 'نه. آپدیت برنامه‌های Squirrel دنبال می‌شود، برنامه‌های استور از روی پکیجشان پیدا می‌شوند، و اگر برنامه جابه‌جا شده باشد Repair درستش می‌کند. لاگین در پوشه‌ی خود پروفایل است.'] },
+    { en: ['Where is my data, and what happens when I remove a profile?', 'In <code>%APPDATA%\\Twinbar\\data</code> (for Store apps, <code>%USERPROFILE%\\Twinbar</code>). Removing a profile keeps its sign-in unless you ask, and even then it goes to the Recycle Bin.'],
+      fa: ['داده‌هایم کجاست و حذف پروفایل چه می‌کند؟', 'در <code>%APPDATA%\\Twinbar\\data</code> (برای برنامه‌های استور، <code>%USERPROFILE%\\Twinbar</code>). حذف پروفایل لاگینش را نگه می‌دارد مگر خودت بخواهی، و حتی آن‌وقت هم به سطل بازیافت می‌رود.'] },
+    { en: ['Why does Windows warn about the installer?', 'It isn\'t code-signed yet (a certificate costs money). Every release lists the SHA-256 of each file and has signed build provenance from GitHub Actions that you can verify.'],
+      fa: ['چرا ویندوز موقع نصب هشدار می‌دهد؟', 'چون هنوز امضای کد ندارد (گواهی‌اش پولی است). ولی هر نسخه SHA-256 همه‌ی فایل‌ها و گواهی ساخت امضاشده از GitHub Actions دارد که می‌توانی بررسی کنی.'] },
+    { en: ['Claude keeps asking me to choose a folder behind a proxy?', 'Use your proxy\'s HTTP address instead of SOCKS. Claude Code\'s sessions inside Claude skip SOCKS proxies; through an HTTP proxy they load fine. <code>twinbar proxies</code> shows which address works.'],
+      fa: ['Claude پشت پروکسی مدام می‌گوید پوشه انتخاب کن؟', 'به‌جای SOCKS از آدرس HTTP پروکسی استفاده کن. سشن‌های Claude Code داخل Claude پروکسی SOCKS را نادیده می‌گیرند، ولی با HTTP درست لود می‌شوند. <code>twinbar proxies</code> نشان می‌دهد کدام آدرس کار می‌کند.'] },
+    { en: ['Can I move a profile to another computer?', 'Yes: <code>twinbar backup</code> and <code>twinbar restore</code>. Apps encrypt their sign-in with your Windows account, so on another PC the data and settings come back but you\'ll usually sign in once more.'],
+      fa: ['می‌توانم پروفایل را به کامپیوتر دیگری ببرم؟', 'بله: <code>twinbar backup</code> و <code>twinbar restore</code>. برنامه‌ها لاگین را با حساب ویندوزت رمز می‌کنند، پس روی کامپیوتر دیگر داده و تنظیمات برمی‌گردد ولی معمولاً یک بار دیگر باید لاگین کنی.'] },
+    { en: ['Is it free?', 'Yes, free and open source under the MIT licence. Bug reports and ideas are very welcome on GitHub.'],
+      fa: ['رایگان است؟', 'بله، رایگان و متن‌باز با مجوز MIT. گزارش مشکل و ایده‌هایت در گیت‌هاب خیلی هم خوش‌آمد است.'] }
+  ];
+
+  var FALLBACK_RELEASES = [
+    ['0.9.0', '2026-11-22', '💾 Storage, cache and backups, plus your own switches'],
+    ['0.8.0', '2026-11-22', '🕒 Twinbar by the clock'],
+    ['0.7.0', '2026-11-22', '🔄 Twinbar updates itself, and finds your proxy for you'],
+    ['0.6.1', '2026-11-22', '🔧 Better proxy advice, after Claude got lost behind SOCKS'],
+    ['0.6.0', '2026-11-22', '🛡️ A proxy for each profile, with a kill switch'],
+    ['0.5.1', '2026-11-22', '🪄 A real Windows installer'],
+    ['0.5.0', '2026-11-22', '🎉 The first release']
+  ];
+
+  var lang = document.documentElement.lang === 'fa' ? 'fa' : 'en';
+  function t(k) { return (T[lang] && T[lang][k] !== undefined) ? T[lang][k] : (T.en[k] !== undefined ? T.en[k] : k); }
+
+  /* ----------------------------------------------------------------- icons */
+  var PALETTE = { blue: '#0090FF', green: '#30A46C', purple: '#8E4EC6', orange: '#F76B15', pink: '#D6409F', teal: '#12A594', red: '#E5484D', indigo: '#3E63DD', yellow: '#D4A017', gray: '#6F6E77' };
+  function shade(hex, amt) {
+    var n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+    var f = function (c) { return Math.max(0, Math.min(255, Math.round(c + (amt < 0 ? c * amt : (255 - c) * amt)))); };
+    return '#' + ((1 << 24) + (f(r) << 16) + (f(g) << 8) + f(b)).toString(16).slice(1);
+  }
+  function rr(x, X, y, w, h, r) { x.beginPath(); x.moveTo(X + r, y); x.arcTo(X + w, y, X + w, y + h, r); x.arcTo(X + w, y + h, X, y + h, r); x.arcTo(X, y + h, X, y, r); x.arcTo(X, y, X + w, y, r); x.closePath(); }
+  function drawBase(x, s, app) {
+    var g = x.createLinearGradient(0, 0, s, s);
+    g.addColorStop(0, app.c1); g.addColorStop(1, app.c2);
+    x.fillStyle = g; rr(x, s * .06, s * .06, s * .88, s * .88, s * .22); x.fill();
+    var hi = x.createLinearGradient(0, s * .06, 0, s * .5);
+    hi.addColorStop(0, 'rgba(255,255,255,.28)'); hi.addColorStop(1, 'rgba(255,255,255,0)');
+    x.fillStyle = hi; rr(x, s * .06, s * .06, s * .88, s * .44, s * .22); x.fill();
+    x.fillStyle = 'rgba(255,255,255,.96)';
+    if (app.glyph === 'bubble') {
+      rr(x, s * .24, s * .26, s * .52, s * .36, s * .1); x.fill();
+      x.beginPath(); x.moveTo(s * .34, s * .58); x.lineTo(s * .3, s * .74); x.lineTo(s * .48, s * .6); x.closePath(); x.fill();
+      x.fillStyle = app.c2; [0.37, 0.5, 0.63].forEach(function (p) { x.beginPath(); x.arc(s * p, s * .44, s * .035, 0, Math.PI * 2); x.fill(); });
+    } else if (app.glyph === 'note') {
+      rr(x, s * .28, s * .22, s * .44, s * .56, s * .06); x.fill();
+      x.fillStyle = app.c2; [0.36, 0.46, 0.56].forEach(function (p, i) { x.fillRect(s * .35, s * p, s * (i === 2 ? .2 : .3), s * .04); });
+    } else {
+      x.font = '800 ' + Math.round(s * .46) + 'px Inter, Vazirmatn, sans-serif';
+      x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.fillText(app.letter, s / 2, s * .53);
+    }
+  }
+  function drawIcon(app, style, color, badge, s) {
+    s = s || 256;
+    var c = document.createElement('canvas'); c.width = c.height = s;
+    var x = c.getContext('2d');
+    drawBase(x, s, app);
+    if (style === 'tint+badge' || style === 'tint') {
+      x.save(); x.globalCompositeOperation = 'color'; x.fillStyle = color; x.fillRect(0, 0, s, s); x.restore();
+      var m = document.createElement('canvas'); m.width = m.height = s; drawBase(m.getContext('2d'), s, app);
+      x.save(); x.globalCompositeOperation = 'destination-in'; x.drawImage(m, 0, 0); x.restore();
+    }
+    if ((style === 'tint+badge' || style === 'badge') && badge) {
+      var r = s * .25, cx = s - r - s * .01, cy = s - r - s * .01;
+      x.beginPath(); x.arc(cx, cy, r, 0, Math.PI * 2); x.fillStyle = '#fff'; x.fill();
+      x.beginPath(); x.arc(cx, cy, r - s * .045, 0, Math.PI * 2); x.fillStyle = style === 'badge' ? color : shade(color, -.28); x.fill();
+      x.fillStyle = '#fff';
+      x.font = '800 ' + Math.round(r * (badge.length > 1 ? .78 : 1.05)) + 'px Inter, Vazirmatn, sans-serif';
+      x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.fillText(badge, cx, cy + r * .07);
+    }
+    return c.toDataURL('image/png');
+  }
+
+  var CHAT = { c1: '#7c6cff', c2: '#4636c9', glyph: 'bubble', letter: 'C' };
+  var NOTES = { c1: '#ffb35c', c2: '#e2621b', glyph: 'note', letter: 'N' };
+  var APPS = [
+    { name: 'Slack', id: 'slack', c1: '#7f6cf2', c2: '#3c2f9e', letter: 'S' },
+    { name: 'Claude', id: 'claude', c1: '#f0a37a', c2: '#b4552f', letter: 'C' },
+    { name: 'Postman', id: 'postman', c1: '#ff8f6b', c2: '#d1452a', letter: 'P' },
+    { name: 'Discord', id: 'discord', c1: '#7d8cff', c2: '#3b48c7', letter: 'D' },
+    { name: 'Bruno', id: 'bruno', c1: '#f6c453', c2: '#c77d10', letter: 'B' },
+    { name: 'Cursor', id: 'cursor', c1: '#6b7280', c2: '#1f2937', letter: 'C' },
+    { name: 'Obsidian', id: 'obsidian', c1: '#a78bfa', c2: '#5b21b6', letter: 'O' }
+  ];
+
+  /* ---------------------------------------------------------- desktop demo */
+  var desk = $('#desk');
+  var icons = {};
+  function deskIcons() {
+    icons.orig = drawIcon(CHAT, 'original', '#000', '', 96);
+    icons.twin = drawIcon(CHAT, 'tint+badge', PALETTE.teal, 'W', 96);
+    icons.notes = drawIcon(NOTES, 'tint+badge', PALETTE.orange, 'T', 96);
+    $$('img[data-icon]', desk).forEach(function (im) { im.src = icons[im.getAttribute('data-icon')]; });
+  }
+  var wins = { personal: { open: true, min: false }, work: { open: true, min: false }, app: { open: false, min: false } };
+  var order = ['personal', 'work'];
+  function focusWin(k) { order = order.filter(function (o) { return o !== k; }); order.push(k); }
+  function renderDesk() {
+    var top = null;
+    for (var i = order.length - 1; i >= 0; i--) { var o = order[i]; if (wins[o].open && !wins[o].min) { top = o; break; } }
+    Object.keys(wins).forEach(function (k) {
+      var el = $('.win[data-win="' + k + '"]', desk), tb = $('.tbb[data-tb="' + k + '"]', desk);
+      el.classList.toggle('closed', !wins[k].open);
+      el.classList.toggle('min', wins[k].open && wins[k].min);
+      el.classList.toggle('top', k === top);
+      el.style.zIndex = 2 + order.indexOf(k);
+      tb.classList.toggle('open', wins[k].open);
+      tb.classList.toggle('active', k === top);
+      if (k === 'app') tb.classList.toggle('hidden', !wins.app.open);
+    });
+  }
+  function showWin(k) { wins[k].open = true; wins[k].min = false; focusWin(k); renderDesk(); }
+  var toastTimer = null;
+  function toast(title, body) {
+    var el = $('#toast'); $('#toastT').textContent = title; $('#toastB').textContent = body;
+    el.classList.remove('hide'); clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.add('hide'); }, 3800);
+  }
+  var startup = true;
+  function closeMenu() { $('#trayMenu').classList.add('hide'); $('#trayIco').classList.remove('on'); }
+  desk.addEventListener('click', function (e) {
+    var tb = e.target.closest('.tbb'), act = e.target.closest('[data-act]'), win = e.target.closest('.win'), mi = e.target.closest('.mi');
+    if (e.target.closest('#trayIco')) {
+      var menu = $('#trayMenu'); var hidden = menu.classList.toggle('hide');
+      $('#trayIco').classList.toggle('on', !hidden); $('#pulse').style.display = 'none';
+      return;
+    }
+    if (mi) {
+      var m = mi.getAttribute('data-m');
+      if (m === 'open') showWin('app');
+      else if (m === 'work') showWin('work');
+      else if (m === 'notes') toast(t('toast.notesT'), t('toast.notesB'));
+      else if (m === 'startup') { startup = !startup; $('#chkStart').innerHTML = startup ? '&#10003;' : ''; toast(t('toast.startT'), t(startup ? 'toast.startOn' : 'toast.startOff')); return; }
+      else if (m === 'quit') { wins.app.open = false; renderDesk(); toast(t('toast.quitT'), t('toast.quitB')); }
+      closeMenu(); return;
+    }
+    closeMenu();
+    if (tb) {
+      var k = tb.getAttribute('data-tb'), w = wins[k];
+      var isTop = tb.classList.contains('active');
+      if (!w.open) showWin(k);
+      else if (isTop) { w.min = true; renderDesk(); }
+      else { w.min = false; focusWin(k); renderDesk(); }
+      return;
+    }
+    if (act && win) {
+      var key = win.getAttribute('data-win'), a = act.getAttribute('data-act');
+      if (a === 'min') wins[key].min = true;
+      if (a === 'close') {
+        wins[key].open = false;
+        if (key === 'app') toast(t('toast.hideT'), t('toast.hideB'));
+      }
+      renderDesk(); return;
+    }
+    if (win) { focusWin(win.getAttribute('data-win')); renderDesk(); }
+  });
+  function tick() {
+    var d = new Date();
+    $('#clockT').textContent = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    $('#clockD').textContent = d.toLocaleDateString('en-US');
+  }
+  tick(); setInterval(tick, 20000);
+
+  /* ------------------------------------------------------------- marquee */
+  var MARQ = [['Slack', '#7f6cf2'], ['Claude', '#d97a4e'], ['Postman', '#f2683f'], ['Discord', '#5865f2'], ['Bruno', '#e0a526'], ['Cursor', '#374151'], ['VS Code', '#2f80ed'], ['Figma', '#a259ff'], ['Signal', '#3a76f0'], ['MongoDB Compass', '#13aa52'], ['Obsidian', '#7c3aed'], ['Notion', '#4b5563'], ['GitHub Desktop', '#6e40c9'], ['Insomnia', '#7e1f86']];
+  (function () {
+    var html = MARQ.map(function (a) { return '<span class="chip"><i style="background:' + a[1] + '">' + a[0][0] + '</i>' + a[0] + '</span>'; }).join('');
+    $('#track').innerHTML = html + html;
+  })();
+
+  /* ---------------------------------------------------------- playground */
+  var P = { app: 0, name: 'Work', badge: '', color: null, style: 'tint+badge', appearance: 'system', proxy: false, proxyUrl: 'http://127.0.0.1:10809' };
+  var NAME_RE = /^[\p{L}\p{N}](?:[\p{L}\p{N}\p{Mn}\u200C ._-]*[\p{L}\p{N}\p{Mn}])?$/u;
+  function nameKey(v) {
+    var k = v.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32).replace(/-+$/, '');
+    if (!k) { var h = 0; for (var i = 0; i < v.length; i++) h = (h * 31 + v.charCodeAt(i)) >>> 0; k = 'p' + ('00000000' + h.toString(16)).slice(-8); }
+    return k;
+  }
+  function autoColor(id) {
+    var names = Object.keys(PALETTE).filter(function (n) { return n !== 'gray'; });
+    var h = 0; for (var i = 0; i < id.length; i++) h = (h * 33 + id.charCodeAt(i)) >>> 0;
+    return names[h % names.length];
+  }
+  function firstChar(v) { var a = Array.from(v.trim()); return a.length ? a[0].toUpperCase() : ''; }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function q(v) { return /[\s"]/.test(v) ? '"' + v.replace(/"/g, '\\"') + '"' : v; }
+
+  function buildPlayground() {
+    $('#pgApps').innerHTML = APPS.map(function (a, i) {
+      return '<button type="button" data-i="' + i + '" aria-pressed="' + (i === P.app) + '"><i style="background:linear-gradient(135deg,' + a.c1 + ',' + a.c2 + ')">' + a.letter + '</i>' + a.name + '</button>';
+    }).join('');
+    $('#pgSw').innerHTML = Object.keys(PALETTE).map(function (n) {
+      return '<button type="button" class="sw" data-c="' + n + '" title="' + n + '" aria-label="' + n + '" style="background:' + PALETTE[n] + '"></button>';
+    }).join('') + '<label class="sw custom" title="custom"><input type="color" id="pgCustom" value="#12a594" aria-label="Custom colour"></label>';
+    $('#pgApps').addEventListener('click', function (e) { var b = e.target.closest('button'); if (b) { P.app = +b.getAttribute('data-i'); renderPlayground(); } });
+    $('#pgSw').addEventListener('click', function (e) { var b = e.target.closest('.sw[data-c]'); if (b) { P.color = b.getAttribute('data-c'); renderPlayground(); } });
+    $('#pgCustom').addEventListener('input', function (e) { P.color = e.target.value.toUpperCase(); renderPlayground(); });
+    $('#pgName').addEventListener('input', function (e) { P.name = e.target.value; renderPlayground(); });
+    $('#pgBadge').addEventListener('input', function (e) { P.badge = e.target.value.trim(); renderPlayground(); });
+    $('#pgStyle').addEventListener('click', function (e) { var b = e.target.closest('button'); if (b) { P.style = b.getAttribute('data-v'); renderPlayground(); } });
+    $('#pgAppear').addEventListener('click', function (e) { var b = e.target.closest('button'); if (b) { P.appearance = b.getAttribute('data-v'); renderPlayground(); } });
+    $('#pgProxyOn').addEventListener('change', function (e) { P.proxy = e.target.checked; renderPlayground(); });
+    $('#pgProxy').addEventListener('input', function (e) { P.proxyUrl = e.target.value.trim(); renderPlayground(); });
+  }
+  function renderPlayground() {
+    var app = APPS[P.app], name = P.name.trim();
+    var valid = name.length > 0 && name.length <= 40 && NAME_RE.test(name);
+    $('#pgWarn').textContent = valid || !name ? '' : t('play.badName');
+    var shown = name || 'Work';
+    var id = app.id + '.' + nameKey(shown);
+    var colorName = P.color && PALETTE[P.color] ? P.color : null;
+    var hex = P.color ? (PALETTE[P.color] || P.color) : PALETTE[autoColor(id)];
+    var badge = (P.badge || firstChar(shown)).toUpperCase();
+    $('#pgAuto').style.visibility = P.color ? 'hidden' : 'visible';
+    $$('#pgApps button').forEach(function (b, i) { b.setAttribute('aria-pressed', i === P.app); });
+    $$('#pgSw .sw[data-c]').forEach(function (b) { b.setAttribute('aria-pressed', P.color ? b.getAttribute('data-c') === P.color : b.getAttribute('data-c') === autoColor(id)); });
+    $$('#pgStyle button').forEach(function (b) { b.setAttribute('aria-pressed', b.getAttribute('data-v') === P.style); });
+    $$('#pgAppear button').forEach(function (b) { b.setAttribute('aria-pressed', b.getAttribute('data-v') === P.appearance); });
+    var big = drawIcon(app, P.style, hex, badge, 256);
+    $('#pgIcon').src = big; $('#pgStartIcon').src = big; $('#pgTwin').src = big;
+    $('#pgOrig').src = drawIcon(app, 'original', hex, '', 96);
+    $('#pgStartName').textContent = app.name + ' ' + shown;
+    $('#pgId').textContent = id;
+    $('#pgProxy').disabled = !P.proxy; $('#pgProxy').style.opacity = P.proxy ? 1 : .5;
+    var parts = [['p', 'twinbar'], ['p', 'new'], ['k', '-App'], ['v', q(app.name)], ['k', '-Name'], ['v', q(shown)]];
+    if (P.color) parts.push(['k', '-Color'], ['v', colorName || hex]);
+    if (P.badge) parts.push(['k', '-Badge'], ['v', q(P.badge)]);
+    if (P.style !== 'tint+badge') parts.push(['k', '-Style'], ['v', P.style]);
+    if (P.appearance !== 'system') parts.push(['k', '-Appearance'], ['v', P.appearance]);
+    if (P.proxy && P.proxyUrl) parts.push(['k', '-Proxy'], ['v', P.proxyUrl]);
+    $('#pgCmdText').innerHTML = parts.map(function (p) { return '<span class="' + p[0] + '">' + esc(p[1]) + '</span>'; }).join(' ');
+  }
+
+  /* -------------------------------------------------------------- features */
+  function renderFeatures() {
+    $('#featGrid').innerHTML = FEATURES.map(function (f) {
+      var tx = f[lang] || f.en;
+      return '<div class="card feat reveal' + (f.n ? ' new' : '') + '" style="--glow:' + f.g + '">' + (f.n ? '<span class="tag">' + t('new') + '</span>' : '') + '<div class="fi">' + f.i + '</div><h3>' + tx[0] + '</h3><p>' + tx[1] + '</p></div>';
+    }).join('');
+    observe($$('#featGrid .reveal'));
+  }
+
+  /* ----------------------------------------------------------------- proxy */
+  function renderProxy() {
+    var up = $('#pxUp').checked;
+    $('#viz').classList.toggle('down', !up);
+    $('#pxStatus').classList.toggle('down', !up);
+    $('#pxLbl').innerHTML = t(up ? 'px.up' : 'px.down');
+    $('#pxText').innerHTML = t(up ? 'px.stUp' : 'px.stDown');
+  }
+
+  /* -------------------------------------------------------------- terminal */
+  var TERM = [
+    { tab: 'new', cmd: 'twinbar new -App Slack -Name Work -Color teal -Proxy http://127.0.0.1:10809', out: [
+      ['o-ok', 'Made "Slack Work".'],
+      ['', '  Start menu:   ...\\Start Menu\\Programs\\Twinbar\\Slack Work.lnk'],
+      ['', '  Icon:         colour #12A594, badge W; via http://127.0.0.1:10809'],
+      ['', '  Sign-in data: ...\\AppData\\Roaming\\Twinbar\\data\\slack\\work (new)'],
+      ['o-dim', 'Open it from the Start menu, or run: twinbar open "Slack Work"']] },
+    { tab: 'proxies', cmd: 'twinbar proxies', out: [
+      ['', 'Proxies on this computer:'],
+      ['o-ok', '  http://127.0.0.1:10809     HTTP, works (Windows\' proxy setting)'],
+      ['o-ok', '  socks5://127.0.0.1:10808   SOCKS5, works'],
+      ['o-dim', 'Use it for a profile: twinbar change PROFILE -Proxy http://127.0.0.1:10809']] },
+    { tab: 'ip', cmd: 'twinbar ip "Slack Work"', out: [
+      ['', 'Slack Work, through http://127.0.0.1:10809:'],
+      ['o-hi', '  IP 203.0.113.7   Frankfurt am Main, Hesse, DE   (AS64500 Example Net)'],
+      ['', 'Without a proxy, directly, like the original app:'],
+      ['o-dim', '  IP 198.51.100.23   Your town   (AS64501 Your ISP)']] },
+    { tab: 'storage', cmd: 'twinbar storage', out: [
+      ['o-dim', 'Profile           Size      Cache  Data folder'],
+      ['', 'Slack Work      412 MB     187 MB  ...\\Twinbar\\data\\slack\\work'],
+      ['', 'Claude Work     1.3 GB     240 MB  ...\\Twinbar\\claude\\work'],
+      ['o-dim', 'Clearing a profile\'s cache keeps its sign-in and data: twinbar clean PROFILE']] },
+    { tab: 'backup', cmd: 'twinbar backup "Slack Work"', out: [
+      ['o-ok', 'Backed up "Slack Work" to ...\\Documents\\Twinbar backups\\slack.work-20261122-183000.zip (198 MB, 2341 files; caches left out).'],
+      ['o-dim', 'It holds the profile\'s sign-in: keep it as safe as a password.']] },
+    { tab: 'update', cmd: 'twinbar update', out: [
+      ['', 'Twinbar 0.9.0 is out (you have 0.8.0): https://github.com/sadrazkh/twinbar/releases/tag/v0.9.0'],
+      ['o-ok', 'Downloaded Twinbar-Setup-0.9.0.exe; its SHA-256 matches the release\'s.'],
+      ['o-ok', 'Updated Twinbar to 0.9.0.']] }
+  ];
+  var termRun = 0;
+  function runTerm(i) {
+    var run = ++termRun, item = TERM[i], pre = $('#termOut');
+    $$('#tabs button').forEach(function (b, j) { b.setAttribute('aria-selected', i === j); });
+    var head = '<span class="ps">PS C:\\Users\\you&gt;</span> ';
+    if (reduced) {
+      pre.innerHTML = head + '<span class="cmdline">' + esc(item.cmd) + '</span>\n' + item.out.map(function (l) { return '<span class="' + l[0] + '">' + esc(l[1]) + '</span>'; }).join('\n');
+      return;
+    }
+    var n = 0;
+    (function type() {
+      if (run !== termRun) return;
+      pre.innerHTML = head + '<span class="cmdline">' + esc(item.cmd.slice(0, n)) + '</span><span class="caret"></span>';
+      if (n < item.cmd.length) { n++; setTimeout(type, 18 + Math.random() * 28); return; }
+      var k = 0, lines = [];
+      setTimeout(function next() {
+        if (run !== termRun) return;
+        if (k < item.out.length) { lines.push('<span class="' + item.out[k][0] + '">' + esc(item.out[k][1]) + '</span>'); k++; }
+        pre.innerHTML = head + '<span class="cmdline">' + esc(item.cmd) + '</span>\n' + lines.join('\n') + (k < item.out.length ? '' : '\n\n' + head + '<span class="caret"></span>');
+        if (k < item.out.length) setTimeout(next, 260);
+      }, 380);
+    })();
+  }
+  $('#tabs').innerHTML = TERM.map(function (x, i) { return '<button type="button" role="tab" data-i="' + i + '">' + x.tab + '</button>'; }).join('');
+  $('#tabs').addEventListener('click', function (e) { var b = e.target.closest('button'); if (b) runTerm(+b.getAttribute('data-i')); });
+
+  /* ------------------------------------------------------------------- faq */
+  function renderFaq() {
+    $('#faqList').innerHTML = FAQ.map(function (f, i) { var x = f[lang] || f.en; return '<details' + (i === 0 ? ' open' : '') + '><summary>' + x[0] + '</summary><div class="a">' + x[1] + '</div></details>'; }).join('');
+  }
+
+  /* ------------------------------------------------------- github: live data */
+  var release = null, releases = null;
+  function cachedFetch(url, key) {
+    try { var c = sessionStorage.getItem(key); if (c) return Promise.resolve(JSON.parse(c)); } catch (e) {}
+    return fetch(url, { headers: { Accept: 'application/vnd.github+json' } }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (j) { try { sessionStorage.setItem(key, JSON.stringify(j)); } catch (e) {} return j; });
+  }
+  function fmtDate(s) { try { return new Date(s).toLocaleDateString(lang === 'fa' ? 'fa-IR' : 'en-US', { year: 'numeric', month: 'long', day: 'numeric' }); } catch (e) { return s; } }
+  function fmtSize(n) { return n ? (n / 1048576).toFixed(1) + ' MB' : ''; }
+  function renderDownload() {
+    if (!release) return;
+    var v = release.tag_name.replace(/^v/, '');
+    var setup = (release.assets || []).filter(function (a) { return a.name === 'Twinbar-Setup-' + v + '.exe'; })[0];
+    $('#dlVer').textContent = v;
+    $('#heroVer').textContent = 'v' + v;
+    $('#twVer').textContent = 'Twinbar ' + v;
+    $('#dlWhen').textContent = t('dl.latest') + ' · ' + t('dl.released') + ' ' + fmtDate(release.published_at);
+    $('#dlNotes').href = release.html_url;
+    if (setup) {
+      $('#dlSetup').href = setup.browser_download_url; $('#heroDl').href = setup.browser_download_url;
+      $('#dlSize').textContent = '(' + fmtSize(setup.size) + ')';
+      $('#vfFile').textContent = setup.name; $('#vfFile2').textContent = setup.name;
+    }
+  }
+  function renderNews() {
+    var list = releases ? releases.filter(function (r) { return !r.draft && !r.prerelease; }).slice(0, 6).map(function (r) {
+      var m = (r.body || '').match(/^##\s+(.+)$/m);
+      return [r.tag_name.replace(/^v/, ''), r.published_at, m ? m[1].trim() : r.name, r.html_url];
+    }) : FALLBACK_RELEASES.slice(0, 6).map(function (r) { return [r[0], r[1], r[2], 'https://github.com/' + REPO + '/releases/tag/v' + r[0]]; });
+    $('#newsGrid').innerHTML = list.map(function (r, i) {
+      return '<a class="card rel reveal in" href="' + r[3] + '" target="_blank" rel="noopener"><div class="top"><span class="v">v' + esc(r[0]) + '</span><span class="d">' + esc(fmtDate(r[1])) + '</span>' + (i === 0 ? '<span class="latest">' + esc(t('dl.latest')) + '</span>' : '') + '</div><h3>' + esc(r[2]) + '</h3></a>';
+    }).join('');
+  }
+  cachedFetch('https://api.github.com/repos/' + REPO + '/releases?per_page=10', 'tb-releases').then(function (j) {
+    releases = j; release = j.filter(function (r) { return !r.draft && !r.prerelease; })[0] || null;
+    renderDownload(); renderNews();
+  }).catch(function () {});
+  cachedFetch('https://api.github.com/repos/' + REPO, 'tb-repo').then(function (j) {
+    if (typeof j.stargazers_count === 'number') $('#stars').textContent = '★ ' + j.stargazers_count;
+  }).catch(function () {});
+
+  /* ------------------------------------------------------------------ copy */
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-copy]'); if (!b) return;
+    var text = $('#' + b.getAttribute('data-copy')).textContent.replace(/^# .*\n/m, '');
+    var done = function () { b.textContent = t('copied'); setTimeout(function () { b.textContent = t('copy'); }, 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, done);
+    else { var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); } catch (err) {} ta.remove(); done(); }
+  });
+
+  /* ------------------------------------------------------- language, theme */
+  function applyLang() {
+    document.documentElement.lang = lang; document.documentElement.dir = lang === 'fa' ? 'rtl' : 'ltr';
+    $$('[data-i18n]').forEach(function (el) { el.innerHTML = t(el.getAttribute('data-i18n')); });
+    $$('[data-i18n-attr]').forEach(function (el) { el.getAttribute('data-i18n-attr').split(';').forEach(function (p) { var kv = p.split(':'); el.setAttribute(kv[0], t(kv[1])); }); });
+    $('#langBtn').textContent = lang === 'fa' ? 'EN' : 'فا';
+    $('#langBtn').setAttribute('aria-label', lang === 'fa' ? 'English' : 'فارسی');
+    renderFeatures(); renderFaq(); renderProxy(); renderPlayground(); renderDownload(); renderNews();
+  }
+  $('#langBtn').addEventListener('click', function () { lang = lang === 'fa' ? 'en' : 'fa'; store.set('twinbar-lang', lang); applyLang(); });
+  $('#themeBtn').addEventListener('click', function () {
+    var th = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', th); store.set('twinbar-theme', th);
+  });
+  $('#pxUp').addEventListener('change', renderProxy);
+
+  /* ---------------------------------------------------------------- reveal */
+  var io = 'IntersectionObserver' in window ? new IntersectionObserver(function (es) {
+    es.forEach(function (en) { if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); } });
+  }, { threshold: .12 }) : null;
+  function observe(els) { els.forEach(function (el) { if (io && !reduced) io.observe(el); else el.classList.add('in'); }); }
+
+  /* ------------------------------------------------------------------ start */
+  function start() {
+    deskIcons(); renderDesk();
+    $('#vizIcon').setAttribute('href', drawIcon(APPS[0], 'tint+badge', PALETTE.teal, 'W', 96));
+    buildPlayground(); applyLang(); runTerm(0);
+    observe($$('.reveal'));
+  }
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(start, start); else start();
+})();
+</script>
+</body>
+</html>

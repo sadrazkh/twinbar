@@ -3,9 +3,14 @@
 [![CI](https://github.com/sadrazkh/twinbar/actions/workflows/ci.yml/badge.svg)](https://github.com/sadrazkh/twinbar/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/sadrazkh/twinbar)](https://github.com/sadrazkh/twinbar/releases/latest)
 [![MIT licence](https://img.shields.io/github/license/sadrazkh/twinbar)](LICENSE)
+[![Website](https://img.shields.io/badge/website-sadrazkh.github.io%2Ftwinbar-7c5cff)](https://sadrazkh.github.io/twinbar/)
 
 A second, separately signed-in copy of your Electron apps on Windows: work and
 personal Slack, two Claude or Postman accounts, a test login next to your real one.
+
+**[Website: try it in your browser](https://sadrazkh.github.io/twinbar/)**, with an
+interactive desktop and an icon designer that writes the command for you
+(in English and Persian).
 
 Twinbar adds an entry such as **Postman Work** to the Start menu. It opens the
 same installed app, with its own sign-in, settings and local data, and its own

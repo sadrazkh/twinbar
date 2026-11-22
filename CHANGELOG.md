@@ -6,6 +6,14 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A website, [sadrazkh.github.io/twinbar](https://sadrazkh.github.io/twinbar/),
+  in English and Persian: an interactive desktop (taskbar buttons, the icon by
+  the clock and its menu), an icon designer that writes the `twinbar new`
+  command, the proxy kill switch shown live, a terminal demo, and the latest
+  release from GitHub.
+
 ## [0.9.0] - 2026-11-22
 
 Storage and cache, extra options per profile, and backups.

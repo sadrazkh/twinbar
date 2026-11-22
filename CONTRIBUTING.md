@@ -16,6 +16,7 @@ Bug reports, ideas and pull requests are welcome.
 | `tests/smoke.ps1` | The tests: static checks, unit checks, and end-to-end checks with a fake Electron app (`tests/FakeApp.cs`) |
 | `tools/make-release.ps1` | Builds the release files; with `-Installer`, the Windows installer too (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)) |
 | `tools/release-notes.ps1`, `docs/releases/` | Each release's notes, and (`-Sync`, in the Release workflow) keeping the published ones up to date |
+| `site/` | The website (one HTML file, English and Persian). The Website workflow publishes it to the `gh-pages` branch when it changes |
 | `installer/twinbar.iss` | The Windows installer: copies the files, then runs `twinbar install` in that folder |
 | `tests/installer.ps1` | Installs the built installer silently, opens the window, uninstalls; CI runs it |
 | `docs/` | [phases](docs/phases.md) (what was built, and what was measured on the way) and images |
