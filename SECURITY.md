@@ -14,7 +14,18 @@ Only the latest release gets fixes.
 
 ## What Twinbar does and doesn't do
 
-- It runs as you, needs no admin rights, and makes no network connections.
+- It runs as you and needs no admin rights. It connects to the network only
+  for these, and sends nothing about you or your profiles:
+  - the update check: once a day while the window is open (it can be turned
+    off under More...), and on `twinbar update`, it asks GitHub's API for the
+    newest release; updating downloads that release's installer and
+    `SHA256SUMS` from this repository's GitHub releases, checks the installer
+    against its SHA-256, and only then runs it;
+  - the IP check (`twinbar ip`, Check IP), when you ask: ipinfo.io, or
+    api.ipify.org if that fails;
+  - finding proxies (`twinbar proxies`, Find...): it asks proxies on this
+    computer (and the one Windows is set to use) to connect to ipinfo.io.
+- Downloads come only from `https://github.com/sadrazkh/twinbar/releases/download/`.
 - It starts apps with `--user-data-dir` and a few Chromium switches, and sets
   window properties (taskbar ID, relaunch details, icon) on their windows from
   its launcher. It doesn't inject code into apps, patch them or re-sign them.

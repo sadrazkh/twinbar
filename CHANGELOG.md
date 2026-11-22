@@ -6,6 +6,31 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-22
+
+Updates from inside Twinbar, and finding the proxy on your computer.
+
+### Added
+
+- Twinbar checks GitHub for a newer version once a day while its window is
+  open (More > Check for updates automatically turns that off). When there is
+  one, it says so once, with what's new, and the version at the bottom right
+  turns into an "Update to x.y.z" link. Update now downloads the installer,
+  checks it against the release's `SHA256SUMS` (and that it comes from
+  Twinbar's own GitHub releases), closes Twinbar, installs quietly over it and
+  opens it again. Profiles stay as they are. Traffic follows Windows' proxy
+  setting.
+- `twinbar update [-Check]`: the same from the command line. For a Twinbar from
+  Scoop it says to run `scoop update twinbar`; for one installed from the zip
+  it opens the installer's window.
+- The window shows Twinbar's version at the bottom right, and a More menu:
+  check for updates, the automatic check, find proxies, and about.
+- `twinbar proxies [-Json]` and Find... next to the Proxy field: the proxies
+  running on this computer (v2rayN, Clash, NekoRay, sing-box, Hiddify, Tor,
+  ... on their usual ports) and the one Windows is set to use, each tried both
+  as HTTP and SOCKS5 and asked to connect out, so you see which works. HTTP ones
+  come first; picking one fills in the Proxy field.
+
 ## [0.6.1] - 2026-11-22
 
 Better proxy advice, after Claude went wrong behind a SOCKS proxy.

@@ -467,6 +467,40 @@ try {
   Assert-True ($storeArgs -match '--proxy-server=socks5://127\.0\.0\.1:1' -and $storeArgs -match 'disable_non_proxied_udp' -and $storeArgs -notmatch 'host-resolver-rules') "Store apps: the proxy and WebRTC switches, without the DNS rule (Claude doesn't start with it)"
   Assert-Equal '--blink-settings=preferredColorScheme=1' $script:Appearances['light'] 'appearance: light prefers the light colour scheme'
 
+  # Windows' proxy setting, in the forms it comes in.
+  $env:TWINBAR_SYSTEM_PROXY = '127.0.0.1:10809'
+  Assert-Equal 'any|127.0.0.1|10809' (@(Get-SystemProxyEntries) | ForEach-Object { '{0}|{1}|{2}' -f $_.Kind, $_.Host, $_.Port }) "Windows' proxy setting: host:port"
+  $env:TWINBAR_SYSTEM_PROXY = 'http=127.0.0.1:10809;https=127.0.0.1:10809;ftp=127.0.0.1:1;socks=127.0.0.1:10808'
+  Assert-Equal 'http|10809 http|10809 socks5|10808' ((@(Get-SystemProxyEntries) | ForEach-Object { '{0}|{1}' -f $_.Kind, $_.Port }) -join ' ') "Windows' proxy setting: one per protocol, FTP left out"
+  $env:TWINBAR_SYSTEM_PROXY = 'http://[::1]:3128'
+  Assert-Equal 'any|[::1]|3128' (@(Get-SystemProxyEntries) | ForEach-Object { '{0}|{1}|{2}' -f $_.Kind, $_.Host, $_.Port }) "Windows' proxy setting: with a scheme and an IPv6 address"
+  $env:TWINBAR_SYSTEM_PROXY = 'none'
+  Assert-Equal 0 @(Get-SystemProxyEntries).Count "Windows' proxy setting: nothing usable"
+  Remove-Item Env:\TWINBAR_SYSTEM_PROXY
+
+  # Updates: what GitHub says about a release, and the SHA-256 list.
+  $releaseJson = '{"tag_name":"v1.2.3","html_url":"https://github.com/sadrazkh/twinbar/releases/tag/v1.2.3","body":"New:\r\n- things",' +
+    '"assets":[{"name":"twinbar-1.2.3.zip","size":10,"browser_download_url":"https://github.com/sadrazkh/twinbar/releases/download/v1.2.3/twinbar-1.2.3.zip"},' +
+    '{"name":"Twinbar-Setup-1.2.3.exe","size":2000,"browser_download_url":"https://github.com/sadrazkh/twinbar/releases/download/v1.2.3/Twinbar-Setup-1.2.3.exe"},' +
+    '{"name":"SHA256SUMS","size":200,"browser_download_url":"https://github.com/sadrazkh/twinbar/releases/download/v1.2.3/SHA256SUMS"}]}'
+  $rel = ConvertFrom-ReleaseJson $releaseJson
+  Assert-Equal '1.2.3|Twinbar-Setup-1.2.3.exe|2000' ('{0}|{1}|{2}' -f $rel.Version, $rel.SetupName, $rel.SetupSize) 'release: version and installer'
+  Assert-Equal "New:`n- things" $rel.Notes "release: what's new"
+  Assert-True ($rel.SumsUrl.EndsWith('/SHA256SUMS')) 'release: the SHA-256 list'
+  Assert-True (Test-UpdateUrl $rel.SetupUrl) "update: Twinbar's own release downloads are allowed"
+  Assert-True (-not (Test-UpdateUrl 'https://github.com/someone/else/releases/download/v1/x.exe')) "update: another repository's aren't"
+  Assert-True (-not (Test-UpdateUrl 'http://github.com/sadrazkh/twinbar/releases/download/v1/x.exe')) "update: nor plain HTTP"
+  Assert-Throws { ConvertFrom-ReleaseJson '{"tag_name":"nightly"}' } "doesn't understand" 'release: an odd tag is refused'
+  Assert-True (Test-NewerVersion '99.0.0') 'update: 99.0.0 is newer'
+  Assert-True (-not (Test-NewerVersion $script:TwinbarVersion)) "update: this version isn't newer than itself"
+  $sha = 'ab' * 32
+  Assert-Equal $sha (Get-ListedHash ("$('cd' * 32)  twinbar-1.2.3.zip`n$($sha.ToUpperInvariant()) *Twinbar-Setup-1.2.3.exe`n") 'Twinbar-Setup-1.2.3.exe') 'SHA256SUMS: the line for the installer (binary mark, any case)'
+  Assert-Throws { Get-ListedHash "$sha  other.exe" 'Twinbar-Setup-1.2.3.exe' } "doesn't list" "SHA256SUMS: a missing line is refused"
+  Assert-Equal '/SILENT /SUPPRESSMSGBOXES /NORESTART' ((Get-SetupArguments 'setup') -join ' ') "update: quiet over the installer's own install"
+  Assert-Equal '/NORESTART' ((Get-SetupArguments 'copy') -join ' ') "update: the installer's window otherwise"
+  Assert-Equal 'copy' (Get-InstallKind) 'update: the repository is a plain copy'
+  Assert-True ((Get-Settings).checkForUpdates) 'settings: checking for updates is on by default'
+
   $old = [pscustomobject]@{ schema = 1; id = 'fakeapp.old'; name = 'Old'; appName = 'Fake App'; launchExe = $stdExe; realExe = $stdExe; dataDir = 'x'; shortcut = 'y'; aumid = 'Twinbar.fakeapp.old' }
   $table = ConvertTo-ProfileTable $old
   Assert-Equal 'standard|tint+badge|O|system' ('{0}|{1}|{2}|{3}' -f $table.appKind, $table.style, $table.badge, $table.appearance) 'an 0.1.0 record gets the new defaults'
@@ -842,8 +876,30 @@ try {
     $r = Invoke-Cli @('ip', '-Json')
     Assert-Equal 1 @((ConvertFrom-Json $r.Out) | ForEach-Object { $_ }).Count 'ip without a profile: just the direct one'
     Assert-Cli (Invoke-Cli @('remove', 'fakeapp.routed', '-DeleteData')) 0 'Removed' 'remove Routed'
+
+    # Finding proxies: the two test proxies on "usual" ports, a closed port, and
+    # Windows' proxy setting pointing at the HTTP one.
+    $httpUrl = "http://127.0.0.1:$($httpProxy.Port)"
+    $script:extraEnv['TWINBAR_PROXY_PORTS'] = "$($socksProxy.Port),$closedPort,$($httpProxy.Port)"
+    $script:extraEnv['TWINBAR_SYSTEM_PROXY'] = "http=127.0.0.1:$($httpProxy.Port);https=127.0.0.1:$($httpProxy.Port)"
+    $r = Invoke-Cli @('proxies', '-Json')
+    Assert-Equal 0 $r.Code 'proxies -Json'
+    $foundProxies = @((ConvertFrom-Json $r.Out) | ForEach-Object { $_ })
+    Assert-Equal "$httpUrl|$socksUrl" (@($foundProxies | ForEach-Object { $_.url }) -join '|') 'proxies: the HTTP one first, then the SOCKS5 one; nothing on the closed port' ($r.Out -replace '\s+', ' ')
+    if ($foundProxies.Count -eq 2) {
+      Assert-True ($foundProxies[0].works -and $foundProxies[1].works) 'proxies: both get out'
+      Assert-True ($foundProxies[0].windowsSetting -and -not $foundProxies[1].windowsSetting) "proxies: the HTTP one is Windows' proxy setting"
+    }
+    $r = Invoke-Cli @('proxies')
+    Assert-Cli $r 0 "HTTP, works \(Windows' proxy setting\)" 'proxies as text'
+    Assert-Cli $r 0 ([regex]::Escape("twinbar change PROFILE -Proxy $httpUrl")) 'proxies: says how to use the HTTP one'
+    $script:extraEnv['TWINBAR_PROXY_PORTS'] = "$closedPort"
+    $script:extraEnv['TWINBAR_SYSTEM_PROXY'] = 'none'
+    Assert-Cli (Invoke-Cli @('proxies')) 0 'No proxy found' 'proxies: none found'
   } finally {
     $script:extraEnv.Remove('TWINBAR_IP_URL')
+    $script:extraEnv.Remove('TWINBAR_PROXY_PORTS')
+    $script:extraEnv.Remove('TWINBAR_SYSTEM_PROXY')
     $socksProxy.Stop(); $httpProxy.Stop(); $ipService.Stop()
   }
 
@@ -864,10 +920,91 @@ try {
   Assert-Cli (Invoke-Cli @('apps')) 0 'Fake Squirrel\s+squirrel' 'apps shows a table'
 
   # -------------------------------------------------------------------------
+  Write-Section 'Updates'
+  # A stand-in for GitHub: the newest release, its SHA256SUMS, and an installer that
+  # writes down how it was started.
+  $updateServer = New-Object TestWebServer
+  $fakeSetup = Join-Path $root 'build\FakeSetup.exe'
+  Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+public static class TwinbarFakeSetup {
+  public static int Main(string[] args) {
+    File.WriteAllText(Environment.GetEnvironmentVariable("TWINBAR_TEST_SETUP_LOG"), String.Join(" ", args));
+    return 0;
+  }
+}
+'@ -Language CSharp -OutputAssembly $fakeSetup -OutputType WindowsApplication
+  $setupBytes = [IO.File]::ReadAllBytes($fakeSetup)
+  $setupHash = (Get-FileHash -LiteralPath $fakeSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+  $newVersion = '9.9.9'
+  $setupName = "Twinbar-Setup-$newVersion.exe"
+  $releaseFor = {
+    param([string] $Tag, [string] $Prefix)
+    $v = $Tag.TrimStart('v')
+    ConvertTo-Json -Depth 4 -InputObject ([ordered]@{
+        tag_name = $Tag; html_url = $updateServer.Url("/release/$Tag"); body = "Better things.`r`n- one`r`n- two"
+        assets   = @(
+          [ordered]@{ name = "Twinbar-Setup-$v.exe"; size = $setupBytes.Length; browser_download_url = $updateServer.Url("$Prefix/Twinbar-Setup-$v.exe") },
+          [ordered]@{ name = 'SHA256SUMS'; size = 200; browser_download_url = $updateServer.Url("$Prefix/SHA256SUMS") }
+        )
+      })
+  }
+  $updateServer.PutText('/good/latest', (& $releaseFor "v$newVersion" '/good'))
+  $updateServer.PutText('/good/SHA256SUMS', "$('cd' * 32)  twinbar-$newVersion.zip`n$setupHash  $setupName`n")
+  $updateServer.Redirect("/good/$setupName", $updateServer.Url('/cdn/setup.exe'))
+  $updateServer.Put('/cdn/setup.exe', $setupBytes)
+  $updateServer.PutText('/same/latest', (& $releaseFor "v$version" '/same'))
+  $updateServer.PutText('/bad/latest', (& $releaseFor "v$newVersion" '/bad'))
+  $updateServer.PutText('/bad/SHA256SUMS', "$('ef' * 32)  $setupName`n")
+  $updateServer.Put("/bad/$setupName", $setupBytes)
+  $updateServer.PutText('/elsewhere/latest', (& $releaseFor "v$newVersion" '/good').Replace("127.0.0.1:$($updateServer.Port)/good/Twinbar", "127.0.0.2:$($updateServer.Port)/good/Twinbar"))
+  try {
+    $script:extraEnv['TWINBAR_UPDATE_URL'] = $updateServer.Url('/good/latest')
+    $r = Invoke-Cli @('update', '-Check')
+    Assert-Cli $r 0 "Twinbar 9\.9\.9 is out \(you have $([regex]::Escape($version))\)" 'update -Check: a newer version'
+    Assert-True ($r.Out -match 'Run "twinbar update"') 'update -Check: says how to install it'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $twHome 'updates'))) 'update -Check downloads nothing'
+    $script:extraEnv['TWINBAR_UPDATE_URL'] = $updateServer.Url('/same/latest')
+    Assert-Cli (Invoke-Cli @('update', '-Check')) 0 'is the newest version' 'update -Check: up to date'
+    Assert-Cli (Invoke-Cli @('update')) 0 'is the newest version' 'update: nothing to do when up to date'
+    $script:extraEnv['TWINBAR_UPDATE_URL'] = $updateServer.Url('/missing')
+    Assert-Cli (Invoke-Cli @('update', '-Check')) 1 "couldn't ask GitHub" "update: GitHub doesn't answer"
+
+    # A Twinbar the installer put there: a copy with an uninstaller next to it.
+    $setupDir = Join-Path $root 'setup install'
+    [void][IO.Directory]::CreateDirectory($setupDir)
+    Copy-Item -LiteralPath $cli -Destination $setupDir
+    [IO.File]::WriteAllText((Join-Path $setupDir 'unins000.exe'), 'stand-in')
+    $setupScript = Join-Path $setupDir 'twinbar.ps1'
+    $setupLog = Join-Path $root 'setup-args.txt'
+    $script:extraEnv['TWINBAR_TEST_SETUP_LOG'] = $setupLog
+    $script:extraEnv['TWINBAR_UPDATE_URL'] = $updateServer.Url('/good/latest')
+    $r = Invoke-Cli @('update') $setupScript
+    Assert-Cli $r 0 'its SHA-256 matches' 'update: the installer is downloaded and checked'
+    Assert-Cli $r 0 'Updated Twinbar to 9\.9\.9' 'update: and run'
+    Assert-Equal '/SILENT /SUPPRESSMSGBOXES /NORESTART' $(if (Test-Path -LiteralPath $setupLog) { [IO.File]::ReadAllText($setupLog) }) 'update: quietly, over the installed copy'
+    Assert-True ($updateServer.Requests() -contains '/cdn/setup.exe') 'update: following the redirect to the file, as GitHub sends'
+    Assert-Equal $setupName (@(Get-ChildItem -LiteralPath (Join-Path $twHome 'updates') | ForEach-Object { $_.Name }) -join ',') 'update: only the checked installer is kept'
+
+    Remove-Item -LiteralPath $setupLog -ErrorAction SilentlyContinue
+    $script:extraEnv['TWINBAR_UPDATE_URL'] = $updateServer.Url('/bad/latest')
+    Assert-Cli (Invoke-Cli @('update') $setupScript) 1 'SHA-256 differs' "update: an installer that doesn't match is refused"
+    Assert-True (-not (Test-Path -LiteralPath $setupLog)) "update: and isn't run"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $twHome "updates\$setupName.part"))) 'update: and is deleted'
+    $script:extraEnv['TWINBAR_UPDATE_URL'] = $updateServer.Url('/elsewhere/latest')
+    Assert-Cli (Invoke-Cli @('update') $setupScript) 1 'somewhere other than' 'update: a download from anywhere else is refused'
+    Assert-True (-not (Test-Path -LiteralPath $setupLog)) 'update: and nothing is run'
+  } finally {
+    foreach ($k in 'TWINBAR_UPDATE_URL', 'TWINBAR_TEST_SETUP_LOG') { $script:extraEnv.Remove($k) }
+  }
+
+  # -------------------------------------------------------------------------
   Write-Section 'The window'
   Initialize-Forms
   [Windows.Forms.Application]::EnableVisualStyles()
   $script:GuiNoDialogs = $true
+  Set-TwinbarSetting 'checkForUpdates' $false # no check of its own when the window opens
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Listed', '-Color', 'teal')) 0 'Made' 'a profile to list'
   $mainForm = New-MainForm
   $mainForm.Opacity = 0
@@ -924,7 +1061,44 @@ try {
     $removeDialog = New-RemoveDialog $row
     Assert-True (-not $removeDialog.DeleteData.Checked) 'Remove: keeps the sign-in unless asked'
     $removeDialog.Form.Dispose()
+
+    # Find... next to Proxy: the menu of proxies found, and picking one.
+    $proxyDialog = New-ProfileDialog $row
+    $menuFound = @([pscustomobject]@{ Url = 'http://127.0.0.1:10809'; Kind = 'HTTP'; State = 'works'; System = $true })
+    $proxyMenu = New-ProxyMenu $proxyDialog $menuFound
+    Assert-True ($proxyMenu.Items[0].Text -match "^http://127\.0\.0\.1:10809 .*HTTP, works \(Windows' proxy setting\)") 'Find proxy: the menu lists what was found'
+    $proxyMenu.Items[0].PerformClick()
+    Assert-Equal 'http://127.0.0.1:10809' $proxyDialog.Proxy.Text 'Find proxy: picking one fills in the Proxy field'
+    $proxyMenu.Dispose()
+    $proxyDialog.Form.Dispose()
+
+    # Updates in the window, from the same stand-in for GitHub.
+    Assert-Equal "Twinbar $version" $script:Gui.Version.Text 'the status bar shows the version'
+    $env:TWINBAR_UPDATE_URL = $updateServer.Url('/good/latest')
+    $script:GuiMessages.Clear()
+    Start-UpdateCheck -Manual
+    $checked = Wait-Until { [Windows.Forms.Application]::DoEvents(); $null -eq $script:Gui.Work } 20
+    Assert-True ($checked -and $script:Gui.Version.Text -eq "Update to $newVersion" -and $script:Gui.Version.IsLink) 'Check for updates: the status bar offers the new version' "$($script:Gui.Version.Text); $($script:GuiMessages -join ' | ')"
+    Assert-True ($script:GuiMessages -contains "Twinbar $newVersion is out.") 'and says so'
+    Remove-Item -LiteralPath (Join-Path $twHome 'updates') -Recurse -Force -ErrorAction SilentlyContinue
+    $script:GuiMessages.Clear()
+    Start-GuiUpdate $script:Gui.Update
+    $downloaded = Wait-Until { [Windows.Forms.Application]::DoEvents(); $null -eq $script:Gui.Work } 30
+    Assert-True ($downloaded -and @($script:GuiMessages | Where-Object { $_ -like 'Ready to install*' }).Count -eq 1) 'Update now: downloaded and checked, ready to install' ($script:GuiMessages -join ' | ')
+    Assert-True (Test-Path -LiteralPath (Join-Path $twHome "updates\$setupName")) 'Update now: the checked installer is kept for it'
+    $env:TWINBAR_UPDATE_URL = $updateServer.Url('/bad/latest')
+    $script:GuiMessages.Clear()
+    Start-GuiUpdate (ConvertFrom-ReleaseJson (& $releaseFor "v$newVersion" '/bad'))
+    [void](Wait-Until { [Windows.Forms.Application]::DoEvents(); $null -eq $script:Gui.Work } 30)
+    Assert-True (@($script:GuiMessages | Where-Object { $_ -match 'SHA-256 differs' }).Count -eq 1) "Update now: an installer that doesn't match is refused" ($script:GuiMessages -join ' | ')
+    $env:TWINBAR_UPDATE_URL = $updateServer.Url('/same/latest')
+    $script:GuiMessages.Clear()
+    Start-UpdateCheck -Manual
+    [void](Wait-Until { [Windows.Forms.Application]::DoEvents(); $null -eq $script:Gui.Work } 20)
+    Assert-True ($script:GuiMessages -contains "Twinbar $version is the newest version.") 'Check for updates: up to date' ($script:GuiMessages -join ' | ')
   } finally {
+    Remove-Item Env:\TWINBAR_UPDATE_URL -ErrorAction SilentlyContinue
+    $updateServer.Stop()
     $mainForm.Close()
     $mainForm.Dispose()
     $script:Gui = $null

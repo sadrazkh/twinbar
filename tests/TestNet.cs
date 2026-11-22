@@ -173,3 +173,69 @@ public class TestIpService {
     }
   }
 }
+
+// Serves fixed files and redirects over HTTP/1.1, as GitHub's API and release
+// downloads do, and logs the paths it was asked for.
+public class TestWebServer {
+  readonly TcpListener listener;
+  readonly Dictionary<string, byte[]> files = new Dictionary<string, byte[]>();
+  readonly Dictionary<string, string> redirects = new Dictionary<string, string>();
+  readonly List<string> requests = new List<string>();
+
+  public TestWebServer() {
+    listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    Thread accept = new Thread(Accept);
+    accept.IsBackground = true;
+    accept.Start();
+  }
+
+  public int Port { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
+  public string Url(string path) { return "http://127.0.0.1:" + Port + path; }
+  public void Put(string path, byte[] body) { lock (files) files[path] = body; }
+  public void PutText(string path, string text) { Put(path, Encoding.UTF8.GetBytes(text)); }
+  public void Redirect(string path, string to) { lock (files) redirects[path] = to; }
+  public string[] Requests() { lock (requests) return requests.ToArray(); }
+  public void Stop() { listener.Stop(); }
+
+  void Accept() {
+    while (true) {
+      TcpClient client;
+      try { client = listener.AcceptTcpClient(); } catch (Exception) { return; }
+      Thread worker = new Thread(delegate () { Serve(client); });
+      worker.IsBackground = true;
+      worker.Start();
+    }
+  }
+
+  void Serve(TcpClient client) {
+    try {
+      NetworkStream s = client.GetStream();
+      StringBuilder head = new StringBuilder();
+      while (!head.ToString().EndsWith("\r\n\r\n")) {
+        int b = s.ReadByte();
+        if (b < 0) return;
+        head.Append((char)b);
+      }
+      string[] first = head.ToString().Split(' ');
+      string path = first.Length > 1 ? first[1] : "/";
+      lock (requests) requests.Add(path);
+      byte[] body;
+      string location;
+      lock (files) {
+        files.TryGetValue(path, out body);
+        redirects.TryGetValue(path, out location);
+      }
+      string status = location != null ? "302 Found" : body != null ? "200 OK" : "404 Not Found";
+      if (body == null) body = new byte[0];
+      string headers = "HTTP/1.1 " + status + "\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n" +
+        (location != null ? "Location: " + location + "\r\n" : "") + "\r\n";
+      byte[] h = Encoding.ASCII.GetBytes(headers);
+      s.Write(h, 0, h.Length);
+      s.Write(body, 0, body.Length);
+    } catch (Exception) {
+    } finally {
+      client.Close();
+    }
+  }
+}

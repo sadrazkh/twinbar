@@ -7,6 +7,7 @@ Twinbar: a second, separately signed-in copy of an Electron app on Windows.
               [-Proxy P] [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
   twinbar change PROFILE [-Color C] [-Badge B] [-Style S] [-Appearance A] [-Proxy P]
   twinbar ip [PROFILE] [-Json]
+  twinbar proxies [-Json]
   twinbar rebuild PROFILE [-App APP] | twinbar rebuild -All
   twinbar doctor [PROFILE]
   twinbar list [-Json]
@@ -16,6 +17,7 @@ Twinbar: a second, separately signed-in copy of an Electron app on Windows.
   twinbar gui
   twinbar install [-Dir DIR] [-AddToPath] [-ShortcutDir DIR]
   twinbar uninstall
+  twinbar update [-Check]
   twinbar help
   twinbar version
 
@@ -44,13 +46,14 @@ param(
   [switch] $All,
   [string] $Dir,
   [switch] $AddToPath,
+  [switch] $Check,
   [switch] $Json
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.6.1'
+$script:TwinbarVersion = '0.7.0'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
@@ -94,6 +97,8 @@ using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Security.Authentication;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace TwinbarInterop {
   [StructLayout(LayoutKind.Sequential, Pack = 4)]
@@ -413,6 +418,62 @@ namespace TwinbarInterop {
         stream.Dispose();
         client.Close();
       }
+    }
+
+    // What answers at host:port when asked, as protocol ("http" or "socks5") says,
+    // to connect to target:targetPort: "ok" (a proxy, and it got there), "fail" (a
+    // proxy that couldn't get there), "auth" (a proxy that wants a password), or ""
+    // (no proxy of that kind: nothing there, or something else).
+    public static string Probe(string host, int port, string protocol, string target, int targetPort, int timeoutMs) {
+      TcpClient client = null;
+      try {
+        client = Connect(host, port, timeoutMs);
+        Stream s = client.GetStream();
+        if (protocol == "socks5") {
+          s.Write(new byte[] { 5, 1, 0 }, 0, 3);
+          byte[] hello = ReadExactly(s, 2);
+          if (hello[0] != 5) return "";
+          if (hello[1] != 0) return "auth";
+          byte[] name = Encoding.ASCII.GetBytes(target);
+          MemoryStream request = new MemoryStream();
+          request.Write(new byte[] { 5, 1, 0, 3, (byte)name.Length }, 0, 5);
+          request.Write(name, 0, name.Length);
+          request.WriteByte((byte)(targetPort >> 8));
+          request.WriteByte((byte)(targetPort & 255));
+          s.Write(request.ToArray(), 0, (int)request.Length);
+          byte[] reply = ReadExactly(s, 2);
+          if (reply[0] != 5) return "";
+          return reply[1] == 0 ? "ok" : "fail";
+        }
+        byte[] connect = Encoding.ASCII.GetBytes("CONNECT " + target + ":" + targetPort + " HTTP/1.1\r\nHost: " + target + ":" + targetPort + "\r\n\r\n");
+        s.Write(connect, 0, connect.Length);
+        string status = ReadHeaderBlock(s).Split(new string[] { "\r\n" }, StringSplitOptions.None)[0];
+        Match code = Regex.Match(status, "^HTTP/1\\.[01] ([0-9]{3})");
+        if (!code.Success) return "";
+        int number = int.Parse(code.Groups[1].Value);
+        if (number == 200) return "ok";
+        if (number == 407) return "auth";
+        if (number >= 500) return "fail";
+        return "";
+      } catch (Exception) {
+        return "";
+      } finally {
+        if (client != null) client.Close();
+      }
+    }
+
+    // Probe for many places at once; the answers come back in the same order.
+    public static string[] ProbeAll(string[] hosts, int[] ports, string[] protocols, string target, int targetPort, int timeoutMs) {
+      string[] answers = new string[hosts.Length];
+      Thread[] workers = new Thread[hosts.Length];
+      for (int i = 0; i < hosts.Length; i++) {
+        int n = i;
+        workers[n] = new Thread(delegate () { answers[n] = Probe(hosts[n], ports[n], protocols[n], target, targetPort, timeoutMs); });
+        workers[n].IsBackground = true;
+        workers[n].Start();
+      }
+      foreach (Thread worker in workers) worker.Join();
+      return answers;
     }
   }
 
@@ -1521,6 +1582,236 @@ function Invoke-Uninstall([string] $Folder) {
 }
 
 # ---------------------------------------------------------------------------
+# Updates: the newest release on GitHub, its installer downloaded and checked
+# against the release's SHA256SUMS, then run. Traffic goes the way Windows' proxy
+# setting says (as a browser's would).
+# ---------------------------------------------------------------------------
+
+$script:Repository = 'sadrazkh/twinbar'
+
+function Get-SettingsPath { Join-Path (Get-TwinbarHome) 'settings.json' }
+
+$script:DefaultSettings = [ordered]@{ checkForUpdates = $true; lastUpdateCheck = ''; notifiedVersion = '' }
+
+# Twinbar's own settings (not a profile's), with defaults for what isn't set.
+function Get-Settings {
+  $s = [ordered]@{}
+  foreach ($k in $script:DefaultSettings.Keys) { $s[$k] = $script:DefaultSettings[$k] }
+  $path = Get-SettingsPath
+  if (Test-Path -LiteralPath $path) {
+    try {
+      $saved = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
+      foreach ($p in $saved.PSObject.Properties) { if ($s.Contains($p.Name)) { $s[$p.Name] = $p.Value } }
+    } catch {
+      Write-Warning "ignoring $($path): it isn't valid JSON"
+    }
+  }
+  return $s
+}
+
+function Set-TwinbarSetting([string] $Name, $Value) {
+  $s = Get-Settings
+  $s[$Name] = $Value
+  [void][IO.Directory]::CreateDirectory((Get-TwinbarHome))
+  $path = Get-SettingsPath
+  [IO.File]::WriteAllText("$path.tmp", ($s | ConvertTo-Json), $script:Utf8NoBom)
+  Move-Item -LiteralPath "$path.tmp" -Destination $path -Force
+}
+
+function Get-UpdateSource {
+  if ($env:TWINBAR_UPDATE_URL) { return $env:TWINBAR_UPDATE_URL }
+  return "https://api.github.com/repos/$($script:Repository)/releases/latest"
+}
+
+function New-WebClient([string] $Url) {
+  # GitHub only speaks TLS 1.2 and newer, which Windows PowerShell may not offer by default.
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $client = New-Object Net.WebClient
+  $client.Headers['User-Agent'] = "Twinbar/$($script:TwinbarVersion)"
+  $client.Encoding = [Text.Encoding]::UTF8
+  if (([Uri]$Url).IsLoopback) { $client.Proxy = $null }
+  return $client
+}
+
+# Downloads only come from Twinbar's own releases on GitHub (or, in tests, from the
+# server TWINBAR_UPDATE_URL names).
+function Test-UpdateUrl([string] $Url) {
+  if ($env:TWINBAR_UPDATE_URL) {
+    $source = [Uri]$env:TWINBAR_UPDATE_URL
+    $u = [Uri]$Url
+    return ($u.Scheme -eq $source.Scheme -and $u.Authority -eq $source.Authority)
+  }
+  return $Url.StartsWith("https://github.com/$($script:Repository)/releases/download/", [StringComparison]::Ordinal)
+}
+
+# The release described by GitHub's answer for the newest release.
+function ConvertFrom-ReleaseJson([string] $Json) {
+  $r = $Json | ConvertFrom-Json
+  $tag = Get-RecordValue $r 'tag_name'
+  $m = [regex]::Match($tag, '^v?([0-9]+\.[0-9]+\.[0-9]+)$')
+  if (-not $m.Success) { Stop-Twinbar "the newest release has a version Twinbar doesn't understand: '$tag'" }
+  $version = $m.Groups[1].Value
+  $setupName = "Twinbar-Setup-$version.exe"
+  $assets = @(if ($r.PSObject.Properties['assets'] -and $r.assets) { $r.assets })
+  $setup = @($assets | Where-Object { $_.name -eq $setupName })
+  $sums = @($assets | Where-Object { $_.name -eq 'SHA256SUMS' })
+  return [pscustomobject]@{
+    Version   = $version
+    Page      = Get-RecordValue $r 'html_url'
+    Notes     = (Get-RecordValue $r 'body').Replace("`r`n", "`n").Trim()
+    SetupName = $setupName
+    SetupUrl  = $(if ($setup.Count) { [string]$setup[0].browser_download_url } else { '' })
+    SetupSize = $(if ($setup.Count) { [long]$setup[0].size } else { [long]0 })
+    SumsUrl   = $(if ($sums.Count) { [string]$sums[0].browser_download_url } else { '' })
+  }
+}
+
+function Get-LatestRelease {
+  $url = Get-UpdateSource
+  $client = New-WebClient $url
+  try {
+    $client.Headers['Accept'] = 'application/vnd.github+json'
+    $json = $client.DownloadString($url)
+  } catch {
+    $e = $_.Exception
+    while ($e.InnerException) { $e = $e.InnerException }
+    Stop-Twinbar "couldn't ask GitHub for the newest version: $($e.Message)"
+  } finally {
+    $client.Dispose()
+  }
+  return (ConvertFrom-ReleaseJson $json)
+}
+
+function Test-NewerVersion([string] $Version) {
+  return ([version]$Version -gt [version]$script:TwinbarVersion)
+}
+
+# How this copy of Twinbar was installed: setup (the Windows installer), scoop,
+# install (twinbar install, from the zip) or copy (run where it is, a repository say).
+function Get-InstallKind {
+  $dir = Split-Path -Parent $script:SelfPath
+  if (@(Get-ChildItem -LiteralPath $dir -Filter 'unins*.exe' -File -ErrorAction SilentlyContinue).Count) { return 'setup' }
+  if ($dir -match '\\scoop\\apps\\') { return 'scoop' }
+  if (Test-Path -LiteralPath (Join-Path $dir $script:InstallMarker)) { return 'install' }
+  return 'copy'
+}
+
+function Get-UpdateDir { Join-Path (Get-TwinbarHome) 'updates' }
+
+# The SHA-256 that a SHA256SUMS file gives for a file name.
+function Get-ListedHash([string] $Sums, [string] $FileName) {
+  foreach ($line in @($Sums -split "`n")) {
+    $m = [regex]::Match($line.Trim(), '^([0-9A-Fa-f]{64}) [ *]?(.+)$')
+    if ($m.Success -and $m.Groups[2].Value.Trim() -eq $FileName) { return $m.Groups[1].Value.ToLowerInvariant() }
+  }
+  Stop-Twinbar "the release's SHA256SUMS doesn't list $FileName, so it can't be checked; nothing was installed"
+}
+
+function Assert-UpdateRelease($Release) {
+  if (-not $Release.SetupUrl -or -not $Release.SumsUrl) {
+    Stop-Twinbar "Twinbar $($Release.Version) has no installer to download yet; try again in a few minutes, or see $($Release.Page)"
+  }
+  foreach ($url in $Release.SetupUrl, $Release.SumsUrl) {
+    if (-not (Test-UpdateUrl $url)) { Stop-Twinbar "the release points somewhere other than Twinbar's GitHub releases ($url); nothing was downloaded" }
+  }
+}
+
+# Checks a downloaded installer against its SHA-256 and gives it its final name.
+function Complete-UpdateFile([string] $Partial, [string] $Expected, [string] $Target) {
+  $actual = (Get-FileHash -LiteralPath $Partial -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actual -ne $Expected) {
+    Remove-Item -LiteralPath $Partial -Force -ErrorAction SilentlyContinue
+    Stop-Twinbar "the downloaded installer isn't the one the release lists (its SHA-256 differs), so it was deleted; nothing was installed"
+  }
+  Move-Item -LiteralPath $Partial -Destination $Target -Force
+  # Older downloads aren't needed any more.
+  Get-ChildItem -LiteralPath (Split-Path -Parent $Target) -Filter 'Twinbar-Setup-*' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -ne $Target } | Remove-Item -Force -ErrorAction SilentlyContinue
+  return $Target
+}
+
+# Downloads the release's installer and checks it; returns its path.
+function Save-UpdateFile($Release) {
+  Assert-UpdateRelease $Release
+  $dir = Get-UpdateDir
+  [void][IO.Directory]::CreateDirectory($dir)
+  $target = Join-Path $dir $Release.SetupName
+  $partial = "$target.part"
+  $client = New-WebClient $Release.SumsUrl
+  try {
+    $expected = Get-ListedHash ($client.DownloadString($Release.SumsUrl)) $Release.SetupName
+    $client.DownloadFile($Release.SetupUrl, $partial)
+  } catch {
+    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+    $e = $_.Exception
+    while ($e.InnerException) { $e = $e.InnerException }
+    if ($e.Message -match "SHA256SUMS") { throw }
+    Stop-Twinbar "couldn't download Twinbar $($Release.Version): $($e.Message)"
+  } finally {
+    $client.Dispose()
+  }
+  return (Complete-UpdateFile $partial $expected $target)
+}
+
+# The installer's command line: quiet over a copy it installed (it keeps the folder
+# and options from before), its own window otherwise.
+function Get-SetupArguments([string] $Kind) {
+  if ($Kind -eq 'setup') { return @('/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART') }
+  return @('/NORESTART')
+}
+
+# For the window: runs the installer once this process has ended (it won't install
+# while the Twinbar window is open), then, after a quiet update, opens Twinbar again.
+function Start-UpdateAfterExit([string] $SetupPath) {
+  $kind = Get-InstallKind
+  $quote = { param($s) "'" + $s.Replace("'", "''") + "'" }
+  $setupArgs = (@(Get-SetupArguments $kind) | ForEach-Object { & $quote $_ }) -join ', '
+  $app = Join-Path (Split-Path -Parent $script:SelfPath) 'Twinbar.exe'
+  $lines = @(
+    "`$ErrorActionPreference = 'SilentlyContinue'",
+    "Wait-Process -Id $PID -Timeout 120",
+    "`$setup = Start-Process -FilePath $(& $quote $SetupPath) -ArgumentList @($setupArgs) -PassThru -Wait"
+  )
+  if ($kind -eq 'setup') { $lines += "if (Test-Path -LiteralPath $(& $quote $app)) { Start-Process -FilePath $(& $quote $app) }" }
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($lines -join "`n")))
+  Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -WindowStyle Hidden `
+    -ArgumentList @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', $encoded)
+}
+
+function Test-TwinbarWindowOpen {
+  $exe = Join-Path (Split-Path -Parent $script:SelfPath) 'Twinbar.exe'
+  return [bool]@(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'Twinbar.exe'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $exe }).Count
+}
+
+function Invoke-Update([switch] $CheckOnly) {
+  $release = Get-LatestRelease
+  Set-TwinbarSetting 'lastUpdateCheck' (Get-Date).ToString('o')
+  if (-not (Test-NewerVersion $release.Version)) {
+    "Twinbar $($script:TwinbarVersion) is the newest version."
+    return
+  }
+  "Twinbar $($release.Version) is out (you have $($script:TwinbarVersion)): $($release.Page)"
+  if ($CheckOnly) {
+    'Run "twinbar update" to install it.'
+    return
+  }
+  $kind = Get-InstallKind
+  if ($kind -eq 'scoop') { Stop-Twinbar 'this Twinbar came from Scoop; update it with: scoop update twinbar' }
+  if ($kind -eq 'setup' -and (Test-TwinbarWindowOpen)) { Stop-Twinbar 'the Twinbar window is open; close it first, or click the update in its status bar' }
+  $setup = Save-UpdateFile $release
+  "Downloaded $($release.SetupName); its SHA-256 matches the release's."
+  if ($kind -eq 'setup') {
+    $p = Start-Process -FilePath $setup -ArgumentList (Get-SetupArguments $kind) -PassThru -Wait
+    if ($p.ExitCode -ne 0) { Stop-Twinbar "the installer stopped with code $($p.ExitCode); Twinbar wasn't updated" }
+    "Updated Twinbar to $($release.Version)."
+  } else {
+    Start-Process -FilePath $setup -ArgumentList (Get-SetupArguments $kind)
+    "Opened the installer: it installs Twinbar $($release.Version) for you, in $(Get-DefaultInstallDir) unless you pick another folder."
+  }
+}
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
@@ -2328,6 +2619,99 @@ function Invoke-Ip([string] $Which, [switch] $AsJson) {
   }
 }
 
+# Ports that proxy apps on this computer listen on by default: v2rayN (10808, 10809),
+# Clash (7890, 7891) and Clash Verge (7897), NekoRay and sing-box (2080, 2081),
+# Hiddify (12334), Shadowsocks and others (1080), Tor (9050, 9150); and 20808, 20809.
+$script:CommonProxyPorts = @(10809, 10808, 20809, 20808, 7890, 7891, 7897, 2080, 2081, 12334, 1080, 9050, 9150)
+
+# Windows' own proxy setting (Settings > Network > Proxy, which VPN apps often set),
+# as places with the kind of proxy each is: http, socks5, or any (both are tried).
+function Get-SystemProxyEntries {
+  $server = $env:TWINBAR_SYSTEM_PROXY
+  if ($null -eq $server) {
+    try {
+      $settings = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+    } catch {
+      return
+    }
+    if ((Get-RecordValue $settings 'ProxyEnable') -ne '1') { return }
+    $server = Get-RecordValue $settings 'ProxyServer'
+  }
+  foreach ($part in @($server -split ';' | Where-Object { $_.Trim() })) {
+    $kind = 'any'
+    $place = $part.Trim()
+    $m = [regex]::Match($place, '^([a-z]+)=(.+)$')
+    if ($m.Success) {
+      $kind = switch ($m.Groups[1].Value) { 'socks' { 'socks5' } 'http' { 'http' } 'https' { 'http' } default { '' } }
+      $place = $m.Groups[2].Value
+    }
+    $place = $place -replace '^[a-z0-9]+://', ''
+    $hp = [regex]::Match($place, '^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):([0-9]{1,5})/?$')
+    if ($kind -and $hp.Success) { [pscustomobject]@{ Host = $hp.Groups[1].Value; Port = [int]$hp.Groups[2].Value; Kind = $kind } }
+  }
+}
+
+# Proxies running on this computer (on the usual ports) and the one Windows is set
+# to use. Each is asked to connect to the IP check service, so "works" means it
+# gets out. HTTP first: some apps can't use a SOCKS proxy outside Chromium.
+function Find-LocalProxies {
+  Initialize-Interop
+  $places = New-Object System.Collections.Generic.List[object]
+  $seen = @{}
+  foreach ($e in @(Get-SystemProxyEntries)) {
+    foreach ($kind in @(if ($e.Kind -eq 'any') { 'http', 'socks5' } else { $e.Kind })) {
+      $key = "$kind|$($e.Host)|$($e.Port)"
+      if (-not $seen.Contains($key)) { $seen[$key] = $true; $places.Add([pscustomobject]@{ Host = $e.Host; Port = $e.Port; Kind = $kind; System = $true }) }
+    }
+  }
+  $ports = if ($env:TWINBAR_PROXY_PORTS) { @($env:TWINBAR_PROXY_PORTS -split ',' | Where-Object { $_ } | ForEach-Object { [int]$_ }) } else { $script:CommonProxyPorts }
+  foreach ($port in $ports) {
+    foreach ($kind in 'http', 'socks5') {
+      $key = "$kind|127.0.0.1|$port"
+      if (-not $seen.Contains($key)) { $seen[$key] = $true; $places.Add([pscustomobject]@{ Host = '127.0.0.1'; Port = $port; Kind = $kind; System = $false }) }
+    }
+  }
+  $target = [Uri]$(if ($env:TWINBAR_IP_URL) { $env:TWINBAR_IP_URL } else { $script:IpServices[0] })
+  $answers = [TwinbarInterop.Net]::ProbeAll(
+    [string[]]@($places | ForEach-Object { $_.Host.Trim('[', ']') }), [int[]]@($places | ForEach-Object { $_.Port }),
+    [string[]]@($places | ForEach-Object { $_.Kind }), $target.Host, $target.Port, 3000)
+  $found = for ($i = 0; $i -lt $places.Count; $i++) {
+    if (-not $answers[$i]) { continue }
+    $p = $places[$i]
+    $state = switch ($answers[$i]) { 'ok' { 'works' } 'fail' { "is there, but can't get out right now" } default { 'wants a password (not supported)' } }
+    [pscustomobject]@{
+      Url = '{0}://{1}:{2}' -f $p.Kind, $p.Host, $p.Port; Kind = $(if ($p.Kind -eq 'http') { 'HTTP' } else { 'SOCKS5' })
+      Works = ($answers[$i] -eq 'ok'); State = $state; System = $p.System; Order = $i
+    }
+  }
+  @($found | Sort-Object @{ Expression = { -not $_.Works } }, @{ Expression = { $_.Kind -ne 'HTTP' } }, @{ Expression = { -not $_.System } }, Order)
+}
+
+function Invoke-Proxies([switch] $AsJson) {
+  $found = @(Find-LocalProxies)
+  if ($AsJson) {
+    $rows = @($found | ForEach-Object { [pscustomobject]@{ url = $_.Url; kind = $_.Kind; works = $_.Works; state = $_.State; windowsSetting = $_.System } })
+    return (ConvertTo-Json -InputObject $rows -Depth 3)
+  }
+  if (-not $found.Count) {
+    "No proxy found on this computer's usual ports, and Windows isn't set to use one."
+    'Start your proxy or VPN app (v2rayN, Clash, NekoRay, ...), or give its address with -Proxy.'
+    return
+  }
+  'Proxies on this computer:'
+  $width = ($found | ForEach-Object { $_.Url.Length } | Measure-Object -Maximum).Maximum
+  foreach ($f in $found) {
+    $line = '  {0}  {1}, {2}' -f $f.Url.PadRight($width), $f.Kind, $f.State
+    if ($f.System) { $line += " (Windows' proxy setting)" }
+    $line
+  }
+  $best = @($found | Where-Object { $_.Works })
+  if ($best.Count) { "Use it for a profile: twinbar change PROFILE -Proxy $($best[0].Url)" }
+  if (@($found | Where-Object { $_.Kind -eq 'SOCKS5' }).Count -and -not @($found | Where-Object { $_.Kind -eq 'HTTP' -and $_.Works }).Count) {
+    $script:SocksTip
+  }
+}
+
 # Checks Twinbar and its profiles, and says what to do about anything wrong.
 function Invoke-Doctor([string] $Which) {
   $script:doctorProblems = 0
@@ -2686,8 +3070,17 @@ function New-MainForm {
   $statusText.Spring = $true
   $statusText.TextAlign = 'MiddleLeft'
   [void]$status.Items.Add($statusText)
+  # Twinbar's version, at the right; it turns into a link when there's an update.
+  $versionText = New-Object Windows.Forms.ToolStripStatusLabel
+  $versionText.Text = "Twinbar $($script:TwinbarVersion)"
+  $versionText.ToolTipText = 'Your version of Twinbar'
+  $versionText.Add_Click({ if ($script:Gui.Update) { Show-UpdateDialog $script:Gui.Update } })
+  [void]$status.Items.Add($versionText)
 
-  $script:Gui = @{ Form = $form; List = $list; Images = $images; Status = $statusText; Rows = @(); Apps = $null; Buttons = @{} }
+  $script:Gui = @{
+    Form = $form; List = $list; Images = $images; Status = $statusText; Version = $versionText; Rows = @(); Apps = $null; Buttons = @{}
+    Update = $null; Work = $null; NextUpdateCheck = [datetime]::MinValue
+  }
   $g = $script:Gui
   $g.Buttons.New = New-GuiButton 'New profile...' { Show-ProfileDialog $null }
   $g.Buttons.Edit = New-GuiButton 'Edit...' { $row = Get-SelectedRow; if ($row) { Show-ProfileDialog $row } }
@@ -2696,7 +3089,8 @@ function New-MainForm {
   $g.Buttons.Repair = New-GuiButton 'Repair' { Repair-SelectedProfile }
   $g.Buttons.Ip = New-GuiButton 'Check IP' { Show-IpCheck }
   $g.Buttons.Check = New-GuiButton 'Check all' { Show-CheckDialog }
-  foreach ($name in 'New', 'Edit', 'Open', 'Remove', 'Repair', 'Ip', 'Check') { $buttons.Controls.Add($g.Buttons[$name]) }
+  $g.Buttons.More = New-GuiButton 'More...' { Show-MoreMenu }
+  foreach ($name in 'New', 'Edit', 'Open', 'Remove', 'Repair', 'Ip', 'Check', 'More') { $buttons.Controls.Add($g.Buttons[$name]) }
 
   $list.Add_SelectedIndexChanged({ Update-GuiButtons })
   $list.Add_DoubleClick({ Open-SelectedProfile })
@@ -2714,15 +3108,284 @@ function New-MainForm {
 
   $timer = New-Object Windows.Forms.Timer
   $timer.Interval = 4000
-  $timer.Add_Tick({ Update-ProfileList -Quiet })
+  $timer.Add_Tick({
+      Update-ProfileList -Quiet
+      if ((Get-Date) -ge $script:Gui.NextUpdateCheck) { Start-UpdateCheck }
+    })
   $g.Timer = $timer
+  $workTimer = New-Object Windows.Forms.Timer
+  $workTimer.Interval = 250
+  $workTimer.Add_Tick({ Update-GuiWork })
+  $g.WorkTimer = $workTimer
   $form.Add_Shown({
       Update-ProfileList
       if ($script:Gui.Rows.Count) { Set-GuiStatus ('{0} profile(s). Double-click one to open it.' -f $script:Gui.Rows.Count) }
       $script:Gui.Timer.Start()
+      Start-UpdateCheck
     })
-  $form.Add_FormClosed({ $script:Gui.Timer.Stop(); $script:Gui.Timer.Dispose() })
+  $form.Add_FormClosed({
+      $g = $script:Gui
+      $g.Timer.Stop(); $g.Timer.Dispose()
+      $g.WorkTimer.Stop(); $g.WorkTimer.Dispose()
+      if ($g.Work) { $g.Work.Client.CancelAsync(); $g.Work.Client.Dispose(); $g.Work = $null }
+    })
   return $form
+}
+
+# --- updates and other network work in the window ---
+# It runs as .NET tasks that a timer looks at, so the window never waits on the
+# network and no script runs off the window's thread.
+
+function Start-GuiWork([string] $Kind, $Task, $Client, $Data) {
+  $g = $script:Gui
+  $g.Work = @{ Kind = $Kind; Task = $Task; Client = $Client; Data = $Data; Started = (Get-Date) }
+  $g.WorkTimer.Start()
+}
+
+function Get-TaskError($Task) {
+  if ($Task.IsCanceled) { return 'it took too long' }
+  $e = $Task.Exception
+  while ($e.InnerException) { $e = $e.InnerException }
+  return $e.Message
+}
+
+function Update-GuiWork {
+  $g = $script:Gui
+  $w = $g.Work
+  if ($null -eq $w) { $g.WorkTimer.Stop(); return }
+  if (-not $w.Task.IsCompleted) {
+    $seconds = ((Get-Date) - $w.Started).TotalSeconds
+    if ($w.Kind -ne 'setup' -and $seconds -gt 30) { $w.Client.CancelAsync() }
+    if ($w.Kind -eq 'setup' -and $w.Data.Release.SetupSize -gt 0 -and (Test-Path -LiteralPath $w.Data.Partial)) {
+      $done = [Math]::Min(99, [int](100 * (Get-Item -LiteralPath $w.Data.Partial).Length / $w.Data.Release.SetupSize))
+      Set-GuiStatus ('Downloading Twinbar {0}... {1}%' -f $w.Data.Release.Version, $done)
+    }
+    return
+  }
+  $g.Work = $null
+  $g.WorkTimer.Stop()
+  $w.Client.Dispose()
+  switch ($w.Kind) {
+    'check' { Complete-UpdateCheck $w }
+    'sums' { Complete-UpdateSums $w }
+    'setup' { Complete-UpdateDownload $w }
+  }
+}
+
+# Asks GitHub for the newest version, in the background: when it's due (once a
+# day, if checking automatically is on), or now with -Manual (More > Check for updates).
+function Start-UpdateCheck([switch] $Manual) {
+  $g = $script:Gui
+  $g.NextUpdateCheck = (Get-Date).AddMinutes(30)
+  if ($g.Work) { if ($Manual) { Set-GuiStatus 'Twinbar is busy with an update; try again in a moment.' }; return }
+  if (-not $Manual) {
+    $s = Get-Settings
+    if (-not $s.checkForUpdates) { return }
+    $last = [datetime]::MinValue
+    if ($s.lastUpdateCheck) { [void][datetime]::TryParse([string]$s.lastUpdateCheck, [ref]$last) }
+    if (((Get-Date) - $last).TotalHours -lt 20) { return }
+  }
+  try {
+    $url = Get-UpdateSource
+    $client = New-WebClient $url
+    $client.Headers['Accept'] = 'application/vnd.github+json'
+    if ($Manual) { Set-GuiStatus 'Checking for updates...' }
+    Start-GuiWork 'check' $client.DownloadStringTaskAsync($url) $client @{ Manual = [bool]$Manual }
+  } catch {
+    if ($Manual) { [void](Show-GuiMessage $g.Form ("Couldn't check for updates: " + (ConvertTo-Sentence $_.Exception.Message))) }
+  }
+}
+
+function Complete-UpdateCheck($Work) {
+  $manual = $Work.Data.Manual
+  if ($Work.Task.IsFaulted -or $Work.Task.IsCanceled) {
+    if ($manual) {
+      Set-GuiStatus ''
+      [void](Show-GuiMessage $script:Gui.Form ("Couldn't ask GitHub for the newest version: " + (ConvertTo-Sentence (Get-TaskError $Work.Task))))
+    }
+    return
+  }
+  try {
+    $release = ConvertFrom-ReleaseJson $Work.Task.Result
+  } catch {
+    if ($manual) { [void](Show-GuiMessage $script:Gui.Form (ConvertTo-Sentence $_.Exception.Message)) }
+    return
+  }
+  Set-TwinbarSetting 'lastUpdateCheck' (Get-Date).ToString('o')
+  if (-not (Test-NewerVersion $release.Version)) {
+    if ($manual) {
+      Set-GuiStatus "Twinbar $($script:TwinbarVersion) is the newest version."
+      [void](Show-GuiMessage $script:Gui.Form "Twinbar $($script:TwinbarVersion) is the newest version." 'OK' 'Information')
+    }
+    return
+  }
+  $g = $script:Gui
+  $g.Update = $release
+  $g.Version.Text = "Update to $($release.Version)"
+  $g.Version.IsLink = $true
+  $g.Version.ToolTipText = "Twinbar $($release.Version) is out; click to see what's new and update"
+  Set-GuiStatus "Twinbar $($release.Version) is out."
+  # Asked once per new version; after that, the link in the status bar stays.
+  if ($manual -or (Get-Settings).notifiedVersion -ne $release.Version) {
+    Set-TwinbarSetting 'notifiedVersion' $release.Version
+    Show-UpdateDialog $release
+  }
+}
+
+# What's new, and Update now / Later.
+function Show-UpdateDialog($Release) {
+  if ($script:GuiNoDialogs) {
+    $script:GuiMessages.Add("Twinbar $($Release.Version) is out.")
+    return
+  }
+  $d = New-Object Windows.Forms.Form
+  $d.Text = 'Update Twinbar'
+  $d.Font = New-GuiFont
+  $d.StartPosition = 'CenterParent'
+  $d.ShowInTaskbar = $false
+  $d.MinimizeBox = $false
+  $d.MaximizeBox = $false
+  $d.ClientSize = New-Object Drawing.Size((Get-Scaled 560), (Get-Scaled 380))
+  $d.Padding = New-Object Windows.Forms.Padding((Get-Scaled 12))
+  $title = New-Object Windows.Forms.Label
+  $title.Text = "Twinbar $($Release.Version) is out. You have $($script:TwinbarVersion)."
+  $title.Font = New-GuiFont 11
+  $title.Dock = 'Top'
+  $title.Height = Get-Scaled 32
+  $notes = New-Object Windows.Forms.TextBox
+  $notes.Multiline = $true
+  $notes.ReadOnly = $true
+  $notes.ScrollBars = 'Vertical'
+  $notes.Dock = 'Fill'
+  $notes.Text = $(if ($Release.Notes) { $Release.Notes.Replace("`n", "`r`n") } else { "See what's new on the release page." })
+  $note = New-Object Windows.Forms.Label
+  $note.Text = $(if ((Get-InstallKind) -eq 'setup') {
+      'Twinbar downloads the installer from GitHub, checks it, closes, updates and opens again. Your profiles stay as they are.'
+    } else {
+      "Twinbar downloads the installer from GitHub, checks it, and opens it. Your profiles stay as they are."
+    })
+  $note.Dock = 'Bottom'
+  $note.Height = Get-Scaled 40
+  $note.Padding = New-Object Windows.Forms.Padding(0, (Get-Scaled 8), 0, 0)
+  $buttons = New-Object Windows.Forms.FlowLayoutPanel
+  $buttons.Dock = 'Bottom'
+  $buttons.AutoSize = $true
+  $buttons.FlowDirection = 'RightToLeft'
+  $later = New-GuiButton 'Later' $null
+  $later.DialogResult = 'Cancel'
+  $now = New-GuiButton 'Update now' $null
+  $now.DialogResult = 'OK'
+  $page = New-GuiButton 'Release page' { if ($script:UpdatePage) { Start-Process -FilePath $script:UpdatePage } }
+  $script:UpdatePage = $Release.Page
+  foreach ($b in @($later, $now, $page)) { $buttons.Controls.Add($b) }
+  $d.Controls.Add($notes)
+  $d.Controls.Add($title)
+  $d.Controls.Add($note)
+  $d.Controls.Add($buttons)
+  $d.AcceptButton = $now
+  $d.CancelButton = $later
+  try {
+    if ($d.ShowDialog($script:Gui.Form) -eq 'OK') { Start-GuiUpdate $Release }
+  } finally {
+    $d.Dispose()
+  }
+}
+
+# Update now: the release's SHA256SUMS, then its installer, both in the background.
+function Start-GuiUpdate($Release) {
+  $g = $script:Gui
+  try {
+    if ((Get-InstallKind) -eq 'scoop') { Stop-Twinbar 'this Twinbar came from Scoop; update it with: scoop update twinbar' }
+    Assert-UpdateRelease $Release
+  } catch {
+    [void](Show-GuiMessage $g.Form (ConvertTo-Sentence $_.Exception.Message))
+    return
+  }
+  if ($g.Work) { $g.Work.Client.CancelAsync(); $g.Work.Client.Dispose(); $g.Work = $null }
+  $client = New-WebClient $Release.SumsUrl
+  Set-GuiStatus "Downloading Twinbar $($Release.Version)..."
+  Start-GuiWork 'sums' $client.DownloadStringTaskAsync($Release.SumsUrl) $client @{ Release = $Release }
+}
+
+function Complete-UpdateSums($Work) {
+  $release = $Work.Data.Release
+  $g = $script:Gui
+  try {
+    if ($Work.Task.IsFaulted -or $Work.Task.IsCanceled) { Stop-Twinbar "couldn't download Twinbar $($release.Version): $(Get-TaskError $Work.Task)" }
+    $expected = Get-ListedHash $Work.Task.Result $release.SetupName
+  } catch {
+    Set-GuiStatus ''
+    [void](Show-GuiMessage $g.Form (ConvertTo-Sentence $_.Exception.Message))
+    return
+  }
+  $dir = Get-UpdateDir
+  [void][IO.Directory]::CreateDirectory($dir)
+  $target = Join-Path $dir $release.SetupName
+  $partial = "$target.part"
+  $client = New-WebClient $release.SetupUrl
+  Start-GuiWork 'setup' $client.DownloadFileTaskAsync($release.SetupUrl, $partial) $client @{ Release = $release; Expected = $expected; Partial = $partial; Target = $target }
+}
+
+function Complete-UpdateDownload($Work) {
+  $d = $Work.Data
+  $g = $script:Gui
+  try {
+    if ($Work.Task.IsFaulted -or $Work.Task.IsCanceled) {
+      Remove-Item -LiteralPath $d.Partial -Force -ErrorAction SilentlyContinue
+      Stop-Twinbar "couldn't download Twinbar $($d.Release.Version): $(Get-TaskError $Work.Task)"
+    }
+    $setup = Complete-UpdateFile $d.Partial $d.Expected $d.Target
+  } catch {
+    Set-GuiStatus ''
+    [void](Show-GuiMessage $g.Form (ConvertTo-Sentence $_.Exception.Message))
+    return
+  }
+  Set-GuiStatus "Downloaded Twinbar $($d.Release.Version); its SHA-256 matches. Updating..."
+  if ($script:GuiNoDialogs) {
+    $script:GuiMessages.Add("Ready to install $setup")
+    return
+  }
+  Start-UpdateAfterExit $setup
+  $g.Form.Close()
+}
+
+function Show-MoreMenu {
+  $g = $script:Gui
+  $menu = New-Object Windows.Forms.ContextMenuStrip
+  $menu.Font = New-GuiFont
+  $check = $menu.Items.Add('Check for updates')
+  $check.Add_Click({ Start-UpdateCheck -Manual })
+  $auto = New-Object Windows.Forms.ToolStripMenuItem 'Check for updates automatically'
+  $auto.Checked = [bool](Get-Settings).checkForUpdates
+  $auto.Add_Click({ param($item) $item.Checked = -not $item.Checked; Set-TwinbarSetting 'checkForUpdates' $item.Checked })
+  [void]$menu.Items.Add($auto)
+  [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+  $proxies = $menu.Items.Add('Find proxies on this computer')
+  $proxies.Add_Click({ Show-ProxiesFound })
+  $about = $menu.Items.Add('About Twinbar')
+  $about.Add_Click({
+      [void](Show-GuiMessage $script:Gui.Form ("Twinbar $($script:TwinbarVersion)`r`n`r`nSecond, separately signed-in copies of your Electron apps.`r`n" +
+          "https://github.com/$($script:Repository) (MIT licence)") 'OK' 'Information')
+    })
+  $button = $g.Buttons.More
+  $menu.Show($button, 0, $button.Height)
+}
+
+function Show-ProxiesFound {
+  $form = $script:Gui.Form
+  $lines = New-Object System.Collections.Generic.List[string]
+  $form.UseWaitCursor = $true
+  Set-GuiStatus 'Looking for proxies on this computer...'
+  [Windows.Forms.Application]::DoEvents()
+  try {
+    Invoke-Proxies | ForEach-Object { $lines.Add([string]$_) }
+  } catch {
+    $lines.Add((ConvertTo-Sentence $_.Exception.Message))
+  } finally {
+    $form.UseWaitCursor = $false
+    Set-GuiStatus ''
+  }
+  Show-TextDialog 'Proxies on this computer' ($lines -join "`r`n")
 }
 
 function Open-SelectedProfile {
@@ -3003,6 +3666,13 @@ function New-ProfileDialog($Row) {
   foreach ($key in $script:AppearanceNames.Keys) { [void]$appearance.Items.Add($key) }
   $proxy = New-Object Windows.Forms.TextBox
   $proxy.Width = $wide
+  $findProxy = New-GuiButton 'Find...' { Show-ProxyChoices $script:Dialog }
+  $proxyRow = New-Object Windows.Forms.FlowLayoutPanel
+  $proxyRow.AutoSize = $true
+  $proxyRow.WrapContents = $false
+  $proxyRow.Margin = New-Object Windows.Forms.Padding(0)
+  $proxyRow.Controls.Add($proxy)
+  $proxyRow.Controls.Add($findProxy)
   $preview = New-Object Windows.Forms.PictureBox
   $preview.Size = New-Object Drawing.Size((Get-Scaled 128), (Get-Scaled 128))
   $preview.SizeMode = 'Zoom'
@@ -3010,13 +3680,13 @@ function New-ProfileDialog($Row) {
   $hint = New-Object Windows.Forms.Label
   $hint.Text = "Leave the badge empty for the name's first letter. Light and dark work for apps that follow Windows. " +
     'Proxy: like http://127.0.0.1:10809 or socks5://127.0.0.1:10808, or empty for none; if it is down, the profile stays offline. ' +
-    "Prefer the HTTP address: some apps (Claude) don't use a SOCKS proxy outside Chromium."
+    "Find looks for proxies on this computer. Prefer the HTTP address: some apps (Claude) don't use a SOCKS proxy outside Chromium."
   $hint.AutoSize = $true
   $hint.MaximumSize = New-Object Drawing.Size(($wide + (Get-Scaled 90)), 0)
   $hint.ForeColor = [Drawing.SystemColors]::GrayText
 
   $rowIndex = 0
-  foreach ($pair in @(@('App', $appRow), @('Name', $name), @('Colour', $color), @('Badge', $badge), @('Icon', $style), @('Appearance', $appearance), @('Proxy', $proxy))) {
+  foreach ($pair in @(@('App', $appRow), @('Name', $name), @('Colour', $color), @('Badge', $badge), @('Icon', $style), @('Appearance', $appearance), @('Proxy', $proxyRow))) {
     $label = New-Object Windows.Forms.Label
     $label.Text = [string]$pair[0]
     $label.AutoSize = $true
@@ -3050,7 +3720,8 @@ function New-ProfileDialog($Row) {
   $appList = New-Object System.Collections.Generic.List[object]
   $state = @{
     Form = $d; Row = $Row; App = $app; AppList = $appList; Browse = $browse; Name = $name; Color = $color
-    Badge = $badge; Style = $style; Appearance = $appearance; Proxy = $proxy; Preview = $preview; Ok = $ok; ColorPicked = $false; Updating = $true
+    Badge = $badge; Style = $style; Appearance = $appearance; Proxy = $proxy; FindProxy = $findProxy; Preview = $preview; Ok = $ok
+    ColorPicked = $false; Updating = $true
   }
   $script:Dialog = $state
 
@@ -3147,6 +3818,41 @@ function New-ProfileDialog($Row) {
   return $state
 }
 
+# The proxies found on this computer, as a menu under Find...; picking one fills
+# in the Proxy field.
+function New-ProxyMenu($State, $Found) {
+  $menu = New-Object Windows.Forms.ContextMenuStrip
+  $menu.Font = New-GuiFont
+  foreach ($f in @($Found)) {
+    $text = '{0}    {1}, {2}' -f $f.Url, $f.Kind, $f.State
+    if ($f.System) { $text += " (Windows' proxy setting)" }
+    $item = $menu.Items.Add($text)
+    $item.Tag = $f.Url
+    $item.Add_Click({ param($item) $script:Dialog.Proxy.Text = [string]$item.Tag })
+  }
+  return $menu
+}
+
+function Show-ProxyChoices($State) {
+  $State.Form.UseWaitCursor = $true
+  [Windows.Forms.Application]::DoEvents()
+  try {
+    $found = @(Find-LocalProxies)
+  } catch {
+    [void](Show-GuiMessage $State.Form (ConvertTo-Sentence $_.Exception.Message))
+    return
+  } finally {
+    $State.Form.UseWaitCursor = $false
+  }
+  if (-not $found.Count) {
+    [void](Show-GuiMessage $State.Form ("No proxy found on this computer's usual ports, and Windows isn't set to use one. " +
+        'Start your proxy or VPN app (v2rayN, Clash, NekoRay, ...), or type its address.') 'OK' 'Information')
+    return
+  }
+  $menu = New-ProxyMenu $State $found
+  $menu.Show($State.FindProxy, 0, $State.FindProxy.Height)
+}
+
 # Makes or changes the profile from the dialog's fields; returns whether it worked.
 function Submit-ProfileDialog($State) {
   $hex = Get-ColorItemHex ([string]$State.Color.SelectedItem)
@@ -3225,6 +3931,10 @@ Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Ele
   twinbar ip [PROFILE] [-Json]
       Show the IP address a profile's traffic comes from (through its proxy),
       next to the one without a proxy.
+  twinbar proxies [-Json]
+      Find proxies running on this computer (v2rayN, Clash, NekoRay, ... on
+      their usual ports) and the one Windows is set to use, and whether each
+      gets out.
   twinbar rebuild PROFILE [-App APP]
   twinbar rebuild -All
       Make a profile's shortcut, icon and launcher again: after the app moved
@@ -3249,6 +3959,10 @@ Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Ele
       -AddToPath lets you type twinbar in any terminal.
   twinbar uninstall
       Remove the installed Twinbar. Profiles stay and keep working.
+  twinbar update [-Check]
+      Look for a newer Twinbar on GitHub and install it: its installer is
+      downloaded, checked against the release's SHA-256 list, and run.
+      -Check only says whether there is one. (The window checks once a day.)
   twinbar version
 
 PROFILE is a name ("Work"), a full name ("Postman Work") or an id ("postman.work").
@@ -3293,6 +4007,8 @@ function Invoke-Twinbar {
     }
     'change' { Invoke-Change -Which $Target -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance -ProxyValue $Proxy }
     'ip' { Invoke-Ip $Target -AsJson:$Json }
+    'proxies' { Invoke-Proxies -AsJson:$Json }
+    'update' { Invoke-Update -CheckOnly:$Check }
     'rebuild' { Invoke-Rebuild -Which $Target -AppPath $App -Every:$All }
     'doctor' { Invoke-Doctor $Target }
     'apps' { Invoke-Apps -AsJson:$Json }

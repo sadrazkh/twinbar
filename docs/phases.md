@@ -1,6 +1,6 @@
 # Phases
 
-Twinbar is built in five phases. Each phase ends with working, tested code on
+Twinbar is built in phases. Each phase ends with working, tested code on
 `main` and a line in [CHANGELOG.md](../CHANGELOG.md).
 
 | Phase | What you get | Status |
@@ -10,6 +10,9 @@ Twinbar is built in five phases. Each phase ends with working, tested code on
 | 3 | Change and repair profiles; light/dark; Microsoft Store apps | Done (0.3.0) |
 | 4 | The Twinbar app: windows and forms, no terminal needed | Done (0.4.0) |
 | 5 | CI, signed releases, Scoop, docs | Done (0.5.0, the first release) |
+| 6 | Updates from inside Twinbar; finding the proxy on this computer | Done (0.7.0) |
+| 7 | An icon in the notification area, and a jump list of profiles | Next (0.8.0) |
+| 8 | Storage and cache, advanced options, backup and restore | Then (0.9.0) |
 
 ## Phase 1: core command line
 
@@ -187,10 +190,46 @@ the owner's account; the zip and its hash are what it would need.
 The tests against Electron from npm were left out too: the tests use a fake
 Electron app, plus the real installed apps when run by hand.
 
+## Phase 6: updates, and finding the proxy (0.7.0)
+
+- The window checks GitHub's API for the newest release once a day while it's
+  open (a setting under More...), shows Twinbar's version at the bottom right,
+  and turns it into an "Update to x.y.z" link when there's a newer one, asking
+  once per version with what's new. Update now downloads the release's
+  `SHA256SUMS` and installer (only from this repository's release downloads),
+  checks the SHA-256, and hands over to a hidden PowerShell that waits for
+  Twinbar to close, runs the installer with `/SILENT` and opens Twinbar again.
+  The network work runs as .NET tasks that a WinForms timer looks at, so the
+  window doesn't wait and no script runs off the window's thread.
+- `twinbar update [-Check]` does the same from a terminal and waits for the
+  installer. A Twinbar from Scoop is pointed at `scoop update`; one installed
+  from the zip gets the installer's window.
+- `twinbar proxies` and Find... next to Proxy: the usual ports of v2rayN, Clash,
+  Clash Verge, NekoRay, sing-box, Hiddify, Shadowsocks and Tor, plus Windows'
+  proxy setting, each tried at once as HTTP (CONNECT) and SOCKS5 and asked to
+  connect to the IP check service: works, can't get out, or wants a password.
+- Tests: a local stand-in for GitHub (the API answer, `SHA256SUMS`, a redirect
+  to the file like GitHub's CDN) and a fake installer that writes down how it
+  was started; a matching download is installed quietly, a mismatched one or
+  one from another server is refused and deleted.
+
+## Phase 7: notification area and jump list (0.8.0)
+
+Planned: an icon by the clock with the profiles (and whether each proxy
+answers), closing the window to it, starting with Windows, and the profiles in
+Twinbar's jump list.
+
+## Phase 8: storage, advanced options, backup (0.9.0)
+
+Planned: each profile's size and a Clear cache that keeps the sign-in; extra
+command-line arguments and environment variables per profile; backing a profile
+up to a zip and restoring it.
+
 ## Not planned
 
 - macOS or Linux. On a Mac, use [DoppelDock](https://github.com/ZarinLab/doppeldock),
   which inspired this project.
 - Apps that aren't built on Electron.
 - Patching, injecting into or re-signing apps, or bypassing licence checks.
-- Network connections or analytics of any kind.
+- Analytics, or any network connection beyond the update check, the IP check
+  and finding proxies (see SECURITY.md).

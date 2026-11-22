@@ -14,8 +14,8 @@ the same time. Microsoft Store apps such as Claude work too.
 
 ![The same app's icon in Twinbar's four styles: original, colour and badge, colour only, badge only](docs/styles.png)
 
-> **Status: early releases (0.5.x).** All five phases are done; see
-> [docs/phases.md](docs/phases.md). It's young: tested on Windows 11 with a
+> **Status: early releases (0.x).** See [docs/phases.md](docs/phases.md) for
+> what's done and what's next. It's young: tested on Windows 11 with a
 > handful of apps, so please report what doesn't work.
 
 ## Requirements
@@ -59,6 +59,25 @@ You can also use it without installing: `.\twinbar.cmd` runs `twinbar.ps1`
 whatever your PowerShell execution policy is, and `.\twinbar.cmd gui` opens the
 window.
 
+### Updates
+
+The window shows Twinbar's version at the bottom right and checks GitHub for a
+newer one once a day. When there is one, it tells you once, with what's new,
+and the version turns into an **Update to x.y.z** link. **Update now**
+downloads the installer, checks its SHA-256 against the release's `SHA256SUMS`
+(and that it comes from this repository's releases), closes Twinbar, installs
+over it and opens it again; your profiles stay as they are. Turn the daily
+check off under **More...**, where **Check for updates** checks right away.
+From a terminal:
+
+```powershell
+twinbar update -Check   # is there a newer version?
+twinbar update          # download, check and install it
+```
+
+The check and the download go the way Windows' proxy setting says, like a
+browser's traffic. A Twinbar from Scoop updates with `scoop update twinbar`.
+
 ## Use the window
 
 Open **Twinbar** from the Start menu. **New profile...** lists the Electron apps
@@ -67,7 +86,8 @@ choose its colour, badge, icon style and appearance while the preview shows the
 result. The list shows your profiles and whether each is running; select one to
 **Open**, **Edit**, **Remove** (it asks whether to delete the sign-in too) or
 **Repair** it (it asks where the app went if it moved). **Check all** runs the
-same checks as `twinbar doctor`.
+same checks as `twinbar doctor`. **More...** has the update check and the
+proxy finder. Twinbar's version is at the bottom right.
 
 ![The Twinbar window with two profiles](docs/window.png)
 
@@ -121,6 +141,8 @@ digits, spaces, `.`, `_` and `-`.
 | `rebuild -All` | The same for every profile; run it after updating Twinbar |
 | `doctor [PROFILE]` | Check Twinbar and the profiles (including whether a profile's proxy answers), and say how to fix what's wrong |
 | `ip [PROFILE]` | The IP address, place and network the world sees for a profile (through its proxy), next to the one without a proxy. **Check IP** in the window does the same. |
+| `proxies [-Json]` | The proxies running on this computer and the one Windows is set to use, and whether each gets out. **Find...** next to Proxy in the window does the same. |
+| `update [-Check]` | Install a newer Twinbar from GitHub, or with `-Check` just say whether there is one |
 | `list [-Json]` | Show the profiles and whether each is running |
 | `open PROFILE` | Start a profile |
 | `remove PROFILE [-DeleteData]` | Remove a profile's shortcut and icon; with `-DeleteData`, its data too |
@@ -152,6 +174,19 @@ and check where its traffic comes out:
 ```powershell
 .\twinbar.cmd new -App Postman -Name Work -Proxy http://127.0.0.1:10809
 .\twinbar.cmd ip "Postman Work"
+```
+
+Not sure of the address? `twinbar proxies` (or **Find...** next to Proxy in
+the window) looks for proxy apps on this computer on their usual ports
+(v2rayN, Clash and Clash Verge, NekoRay and sing-box, Hiddify, Shadowsocks,
+Tor) and at the proxy Windows is set to use. It tries each as HTTP and as
+SOCKS5, asks it to connect out, and lists what works, HTTP first:
+
+```text
+Proxies on this computer:
+  http://127.0.0.1:10809     HTTP, works (Windows' proxy setting)
+  socks5://127.0.0.1:10808   SOCKS5, works
+Use it for a profile: twinbar change PROFILE -Proxy http://127.0.0.1:10809
 ```
 
 **Prefer the proxy's HTTP address.** Chromium uses SOCKS5 and HTTP proxies
