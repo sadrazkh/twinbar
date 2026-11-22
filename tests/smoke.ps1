@@ -249,7 +249,7 @@ try {
     [void][Management.Automation.Language.Parser]::ParseFile($file, [ref] $tokens, [ref] $errors)
     Assert-Equal 0 @($errors).Count "$(Split-Path -Leaf $file) parses"
   }
-  foreach ($file in @($cli, (Join-Path $repo 'twinbar.cmd'), $PSCommandPath, (Join-Path $PSScriptRoot 'FakeApp.cs'), (Join-Path $PSScriptRoot 'TestNet.cs'))) {
+  foreach ($file in @($cli, (Join-Path $repo 'twinbar.cmd'), $PSCommandPath, (Join-Path $PSScriptRoot 'FakeApp.cs'), (Join-Path $PSScriptRoot 'TestNet.cs'), (Join-Path $repo 'tools\release-notes.ps1'), (Join-Path $repo 'tools\make-release.ps1'))) {
     $bytes = [IO.File]::ReadAllBytes($file)
     Assert-True (@($bytes | Where-Object { $_ -gt 127 }).Count -eq 0) "$(Split-Path -Leaf $file) is plain ASCII (Windows PowerShell reads it the same in any locale)"
   }
@@ -294,6 +294,16 @@ try {
     Assert-True ($sumLines -contains ('{0}  twinbar-{1}.zip' -f $scoop.hash, $version)) 'SHA256SUMS has the zip'
     Assert-True ([IO.File]::ReadAllText($notes) -match 'scoop install' -and [IO.File]::ReadAllText($notes) -match '### ') "the release notes have the version's changes and how to install"
   }
+  # Every release since the first has notes of its own in docs\releases.
+  $released = @([regex]::Matches([IO.File]::ReadAllText((Join-Path $repo 'CHANGELOG.md')), '(?m)^## \[([0-9]+\.[0-9]+\.[0-9]+)\]') |
+      ForEach-Object { $_.Groups[1].Value } | Where-Object { [version]$_ -ge [version]'0.5.0' })
+  $missingNotes = @($released | Where-Object { -not (Test-Path -LiteralPath (Join-Path $repo "docs\releases\v$_.md")) })
+  Assert-Equal '' ($missingNotes -join ', ') 'every release has its notes in docs\releases'
+  $notesTool = Join-Path $repo 'tools\release-notes.ps1'
+  $firstNotes = (& $powershellExe -NoProfile -ExecutionPolicy Bypass -File $notesTool -Version 0.5.0) -join "`n"
+  Assert-True ($firstNotes -match 'twinbar-0\.5\.0\.zip' -and $firstNotes -notmatch 'Twinbar-Setup') "release notes: 0.5.0, from before the installer, only offer the zip"
+  $thisNotes = (& $powershellExe -NoProfile -ExecutionPolicy Bypass -File $notesTool -Version $version) -join "`n"
+  Assert-True ($thisNotes -match [regex]::Escape("Twinbar-Setup-$version.exe") -and $thisNotes -match [regex]::Escape("Update to $version")) "release notes: $version offers the installer, and says Twinbar updates itself"
 
   # The installer script: Inno Setup's preprocessor takes any line starting with
   # "#" as a directive, even in [Code] (a line starting with #13#10 broke a build).
@@ -496,6 +506,7 @@ try {
   $rel = ConvertFrom-ReleaseJson $releaseJson
   Assert-Equal '1.2.3|Twinbar-Setup-1.2.3.exe|2000' ('{0}|{1}|{2}' -f $rel.Version, $rel.SetupName, $rel.SetupSize) 'release: version and installer'
   Assert-Equal "New:`n- things" $rel.Notes "release: what's new"
+  Assert-Equal "New:`n- things" (ConvertFrom-ReleaseJson ($releaseJson.Replace('- things"', '- things\r\n\r\n---\r\n\r\n## Install\r\nDownload it."'))).Notes "release: what's new, without the install section"
   Assert-True ($rel.SumsUrl.EndsWith('/SHA256SUMS')) 'release: the SHA-256 list'
   Assert-True (Test-UpdateUrl $rel.SetupUrl) "update: Twinbar's own release downloads are allowed"
   Assert-True (-not (Test-UpdateUrl 'https://github.com/someone/else/releases/download/v1/x.exe')) "update: another repository's aren't"

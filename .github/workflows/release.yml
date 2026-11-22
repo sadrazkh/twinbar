@@ -2,7 +2,8 @@
 # has no tag yet, this tests it, builds the release files and the installer,
 # tests installing and uninstalling, records signed build provenance, and
 # creates the tag v<version> and the GitHub release.
-# To release: raise $script:TwinbarVersion, add its CHANGELOG.md section, push.
+# To release: raise $script:TwinbarVersion, add its CHANGELOG.md section and its
+# notes in docs/releases/v<version>.md, push.
 name: Release
 
 on:
@@ -95,3 +96,25 @@ jobs:
         run: |
           $files = (Get-ChildItem -LiteralPath dist -File).FullName
           gh release create "v$env:VERSION" @files --target $env:GITHUB_SHA --title "Twinbar $env:VERSION" --notes-file release-notes.md
+
+  # Every release's notes come from docs/releases/v<version>.md (and
+  # tools/release-notes.ps1): after a push to main, the releases whose notes
+  # changed are updated, the old ones too.
+  notes:
+    name: Bring the release notes up to date
+    needs: [check, release]
+    if: ${{ always() && needs.check.result == 'success' && needs.release.result != 'failure' && needs.release.result != 'cancelled' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # edit the releases' notes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Update the notes that differ
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pwsh -NoProfile -File tools/release-notes.ps1 -Sync

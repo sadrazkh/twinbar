@@ -10,8 +10,9 @@ Writes into OutDir:
   twinbar-<version>.zip        twinbar.ps1, twinbar.cmd, README.md, LICENSE, CHANGELOG.md
   twinbar.json                 a Scoop manifest for that zip
   SHA256SUMS                   the SHA-256 of each
-and, with -NotesPath, the release notes: the version's CHANGELOG section plus
-how to install and check the download. The version comes from twinbar.ps1, and
+and, with -NotesPath, the release notes (tools\release-notes.ps1: the version's
+docs\releases notes, or its CHANGELOG section, plus how to install and check
+the download). The version comes from twinbar.ps1, and
 CHANGELOG.md must have a section for it. The CI and Release workflows run this.
 #>
 param(
@@ -52,7 +53,6 @@ if (-not $version) { throw "couldn't find `$script:TwinbarVersion in twinbar.ps1
 $changelog = [IO.File]::ReadAllText((Join-Path $repo 'CHANGELOG.md')).Replace("`r`n", "`n")
 $section = [regex]::Match($changelog, "(?ms)^## \[$([regex]::Escape($version))\][^\n]*\n(.*?)(?=^## \[|\z)")
 if (-not $section.Success) { throw "CHANGELOG.md has no section for $version" }
-$changes = $section.Groups[1].Value.Trim()
 
 $cmd = [IO.File]::ReadAllText((Join-Path $repo 'twinbar.cmd'))
 if ($cmd -notmatch "`r`n" -or $cmd -match "[^`r]`n") { throw 'twinbar.cmd must have CRLF line endings (see .gitattributes)' }
@@ -122,37 +122,7 @@ $sums = foreach ($name in $names) {
 [IO.File]::WriteAllText((Join-Path $OutDir 'SHA256SUMS'), (($sums -join "`n") + "`n"), $utf8)
 
 if ($NotesPath) {
-  $notes = @'
-{{CHANGES}}
-
-## Install
-
-Download **`{{SETUP}}`** below and run it. It installs Twinbar for you only, with
-no admin rights, puts **Twinbar** in the Start menu and opens it. It isn't
-code-signed yet, so Windows may say "Windows protected your PC": click
-**More info**, then **Run anyway**. Twinbar is then in Settings > Apps, where
-you can uninstall it; your profiles stay.
-
-Or download `{{ZIP}}`, unpack it anywhere, and in that folder run
-`.\twinbar.cmd install -AddToPath`. Or, with [Scoop](https://scoop.sh):
-
-```powershell
-scoop install https://github.com/{{REPO}}/releases/download/v{{VERSION}}/twinbar.json
-```
-
-## Check the download
-
-`SHA256SUMS` has the SHA-256 of each file, and each file has signed build
-provenance from this repository's Release workflow:
-
-```powershell
-(Get-FileHash .\{{SETUP}} -Algorithm SHA256).Hash
-gh attestation verify .\{{SETUP}} -R {{REPO}}
-```
-'@
-  $notes = $notes.Replace('{{CHANGES}}', $changes).Replace('{{SETUP}}', $setupName).Replace('{{ZIP}}', $zipName).Replace('{{REPO}}', $Repository).Replace('{{VERSION}}', $version)
-  if (-not [IO.Path]::IsPathRooted($NotesPath)) { $NotesPath = Join-Path (Get-Location).ProviderPath $NotesPath }
-  [IO.File]::WriteAllText($NotesPath, $notes.Replace("`r`n", "`n"), $utf8)
+  & (Join-Path $PSScriptRoot 'release-notes.ps1') -Version $version -OutPath $NotesPath -Repository $Repository
 }
 
 "Twinbar $version release files in $($OutDir):"

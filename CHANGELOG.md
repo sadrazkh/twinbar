@@ -37,6 +37,16 @@ Storage and cache, extra options per profile, and backups.
   password.
 - Right-click a profile in the window for all it can do: Open, Edit, Check IP,
   Clear cache, Back up, Repair, Remove.
+- The Twinbar window keeps a short log, `%APPDATA%\Twinbar\logs\window.log`:
+  when it started, why its window closed and whether it stayed by the clock,
+  requests from another Twinbar.exe, and slow refreshes. Useful when
+  reporting a problem.
+
+### Changed
+
+- Every release on GitHub, old ones too, has fuller notes, from
+  `docs/releases/`; the Release workflow keeps them up to date. Twinbar's
+  update window shows just their what's-new part.
 
 ## [0.8.0] - 2026-11-22
 

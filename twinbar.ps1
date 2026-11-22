@@ -1832,10 +1832,14 @@ function ConvertFrom-ReleaseJson([string] $Json) {
   $assets = @(if ($r.PSObject.Properties['assets'] -and $r.assets) { $r.assets })
   $setup = @($assets | Where-Object { $_.name -eq $setupName })
   $sums = @($assets | Where-Object { $_.name -eq 'SHA256SUMS' })
+  # What's new: the notes down to their install section, which starts after a "---" line.
+  $notes = (Get-RecordValue $r 'body').Replace("`r`n", "`n")
+  $cut = $notes.IndexOf("`n---`n")
+  if ($cut -ge 0) { $notes = $notes.Substring(0, $cut) }
   return [pscustomobject]@{
     Version   = $version
     Page      = Get-RecordValue $r 'html_url'
-    Notes     = (Get-RecordValue $r 'body').Replace("`r`n", "`n").Trim()
+    Notes     = $notes.Trim()
     SetupName = $setupName
     SetupUrl  = $(if ($setup.Count) { [string]$setup[0].browser_download_url } else { '' })
     SetupSize = $(if ($setup.Count) { [long]$setup[0].size } else { [long]0 })

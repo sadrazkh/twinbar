@@ -15,6 +15,7 @@ Bug reports, ideas and pull requests are welcome.
 | `twinbar.cmd` | Runs `twinbar.ps1` whatever the execution policy is |
 | `tests/smoke.ps1` | The tests: static checks, unit checks, and end-to-end checks with a fake Electron app (`tests/FakeApp.cs`) |
 | `tools/make-release.ps1` | Builds the release files; with `-Installer`, the Windows installer too (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)) |
+| `tools/release-notes.ps1`, `docs/releases/` | Each release's notes, and (`-Sync`, in the Release workflow) keeping the published ones up to date |
 | `installer/twinbar.iss` | The Windows installer: copies the files, then runs `twinbar install` in that folder |
 | `tests/installer.ps1` | Installs the built installer silently, opens the window, uninstalls; CI runs it |
 | `docs/` | [phases](docs/phases.md) (what was built, and what was measured on the way) and images |
@@ -55,11 +56,16 @@ the tests with [PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer
 ## Releasing
 
 1. Raise `$script:TwinbarVersion` at the top of `twinbar.ps1`.
-2. Add a `## [x.y.z] - date` section to `CHANGELOG.md` (the tests check it's there).
+2. Add a `## [x.y.z] - date` section to `CHANGELOG.md`, and the release's notes
+   in `docs/releases/vx.y.z.md`: friendlier than the CHANGELOG, with what's new
+   and why it matters (the tests check both are there). Keep a `---` line out
+   of them: Twinbar's update window shows the notes up to the first one, and
+   `tools/release-notes.ps1` adds how to install and check the download below it.
 3. Push to `main`. The Release workflow sees a version without a tag, runs the
    tests, builds the files and the installer, tests installing and
    uninstalling, records their provenance, and creates the tag and the release
-   with that CHANGELOG section as its notes.
+   with those notes. Changing an older release's notes file and pushing
+   updates that release's notes too.
 
 ## Pull requests
 
