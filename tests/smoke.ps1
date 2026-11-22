@@ -1232,10 +1232,12 @@ public static class TwinbarTestWindows {
   [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr lParam);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hwnd, StringBuilder name, int size);
   [DllImport("user32.dll")] static extern IntPtr SendMessageW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
-  [DllImport("user32.dll")] static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll", SetLastError = true)] static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
   // What the window's X button sends (WM_SYSCOMMAND, SC_CLOSE). A plain WM_CLOSE,
-  // as Process.CloseMainWindow sends, ends Twinbar instead.
-  public static void CloseLikeUser(IntPtr window) { PostMessageW(window, 0x0112, (IntPtr)0xF060, IntPtr.Zero); }
+  // as Process.CloseMainWindow sends, ends Twinbar instead. "" if posted, else the error.
+  public static string CloseLikeUser(IntPtr window) {
+    return PostMessageW(window, 0x0112, (IntPtr)0xF060, IntPtr.Zero) ? "" : "PostMessage failed, error " + Marshal.GetLastWin32Error();
+  }
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr lParam);
   [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr hwnd, out int pid);
@@ -1281,11 +1283,13 @@ public static class TwinbarTestWindows {
       Assert-True (Wait-Until { (Get-TaskbarAppIds) -contains 'Twinbar.App' } 10) 'Twinbar has a taskbar button of its own'
     }
     $appWindow = $appProcess.MainWindowHandle
-    [TwinbarTestWindows]::CloseLikeUser($appWindow)
+    $posted = [TwinbarTestWindows]::CloseLikeUser($appWindow)
     $hidden = Wait-Until { $appProcess.HasExited -or -not [TwinbarTestWindows]::IsWindowVisible($appWindow) } 20
+    $windowLog = Join-Path $twHome 'logs\window.log'
     $seen = if ($appProcess.HasExited) { 'it exited' } else {
-      'visible: {0} window visible: {1}; settings: {2}' -f [TwinbarTestWindows]::VisibleWindows($appProcess.Id), [TwinbarTestWindows]::IsWindowVisible($appWindow),
-      ([IO.File]::ReadAllText((Join-Path $twHome 'settings.json')) -replace '\s+', ' ')
+      '{0} visible: {1} window visible: {2}; settings: {3}; log: {4}' -f $posted, [TwinbarTestWindows]::VisibleWindows($appProcess.Id), [TwinbarTestWindows]::IsWindowVisible($appWindow),
+      ([IO.File]::ReadAllText((Join-Path $twHome 'settings.json')) -replace '\s+', ' '),
+      $(if (Test-Path -LiteralPath $windowLog) { (Get-Content -LiteralPath $windowLog -Tail 8) -join ' | ' } else { 'none' })
     }
     Assert-True $hidden 'closing the window hides it' $seen
     Assert-True (-not $appProcess.HasExited) 'and Twinbar stays by the clock'

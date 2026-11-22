@@ -3312,8 +3312,11 @@ function New-MainForm {
   $timer = New-Object Windows.Forms.Timer
   $timer.Interval = 4000
   $timer.Add_Tick({
+      $began = Get-Date
       if ($script:Gui.Form.Visible) { Update-ProfileList -Quiet }
       if ((Get-Date) -ge $script:Gui.NextUpdateCheck) { Start-UpdateCheck }
+      $took = ((Get-Date) - $began).TotalSeconds
+      if ($took -gt 2) { Write-WindowLog ('refreshing the list took {0:0.0} s' -f $took) }
     })
   $g.Timer = $timer
   $workTimer = New-Object Windows.Forms.Timer
@@ -3331,7 +3334,9 @@ function New-MainForm {
   $form.Add_FormClosing({
       param($window, $closing)
       $g = $script:Gui
-      if ($g.Tray -and -not $g.Quitting -and $closing.CloseReason -eq 'UserClosing' -and (Get-Settings).closeToTray) {
+      $keep = $g.Tray -and -not $g.Quitting -and $closing.CloseReason -eq 'UserClosing' -and (Get-Settings).closeToTray
+      Write-WindowLog ('closing ({0}): {1}' -f $closing.CloseReason, $(if ($keep) { 'hidden, Twinbar stays by the clock' } else { 'Twinbar ends' }))
+      if ($keep) {
         $closing.Cancel = $true
         $window.Hide()
         if (-not (Get-Settings).trayHintShown) {
@@ -3354,9 +3359,22 @@ function Start-GuiBackground {
   Start-UpdateCheck
 }
 
+# A short log of what the window did (logs\window.log), for when something goes wrong.
+function Write-WindowLog([string] $Text) {
+  try {
+    $path = Join-Path (Get-TwinbarHome) 'logs\window.log'
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+    if ((Test-Path -LiteralPath $path) -and (Get-Item -LiteralPath $path).Length -gt 262144) { Move-Item -LiteralPath $path -Destination "$path.old" -Force }
+    [IO.File]::AppendAllText($path, ('{0}  [{1}] {2}{3}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $PID, $Text, [Environment]::NewLine))
+  } catch {
+    Write-Verbose "couldn't write the window log: $($_.Exception.Message)"
+  }
+}
+
 function Stop-GuiApp {
   $g = $script:Gui
   if ($null -eq $g -or $g.Stopped) { return }
+  Write-WindowLog 'stopped'
   $g.Stopped = $true
   $g.Timer.Stop(); $g.Timer.Dispose()
   $g.WorkTimer.Stop(); $g.WorkTimer.Dispose()
@@ -4259,10 +4277,12 @@ function Show-TwinbarWindow([switch] $InTray) {
     $signals.Interval = 300
     $signals.Add_Tick({
         $g = $script:Gui
-        if ($g.QuitSignal.WaitOne(0)) { Exit-TwinbarWindow } elseif ($g.ShowSignal.WaitOne(0)) { Show-MainWindow }
+        if ($g.QuitSignal.WaitOne(0)) { Write-WindowLog 'asked to quit'; Exit-TwinbarWindow }
+        elseif ($g.ShowSignal.WaitOne(0)) { Write-WindowLog 'asked to show the window'; Show-MainWindow }
       })
     $g.SignalTimer = $signals
     $signals.Start()
+    Write-WindowLog ("Twinbar $($script:TwinbarVersion) started" + $(if ($InTray) { ', by the clock' } else { '' }))
     if ($InTray) { Start-GuiBackground } else { $form.Show() }
     Update-JumpList
     [Windows.Forms.Application]::Run($g.Context)
