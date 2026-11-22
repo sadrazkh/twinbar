@@ -119,7 +119,8 @@ digits, spaces, `.`, `_` and `-`.
 | `change PROFILE` | Change its `-Color`, `-Badge`, `-Style` or `-Appearance`. Its name and data stay; taskbar pins get the new icon too. |
 | `rebuild PROFILE [-App APP]` | Make its shortcut, icon and launcher again. `-App` points it at the app's new place. |
 | `rebuild -All` | The same for every profile; run it after updating Twinbar |
-| `doctor [PROFILE]` | Check Twinbar and the profiles, and say how to fix what's wrong |
+| `doctor [PROFILE]` | Check Twinbar and the profiles (including whether a profile's proxy answers), and say how to fix what's wrong |
+| `ip [PROFILE]` | The IP address, place and network the world sees for a profile (through its proxy), next to the one without a proxy. **Check IP** in the window does the same. |
 | `list [-Json]` | Show the profiles and whether each is running |
 | `open PROFILE` | Start a profile |
 | `remove PROFILE [-DeleteData]` | Remove a profile's shortcut and icon; with `-DeleteData`, its data too |
@@ -138,9 +139,47 @@ Options for `new` (and, except the last three, `change`):
 | `-Badge B` | 1 or 2 letters or digits. By default the name's first letter. |
 | `-Style S` | `tint+badge` (default), `tint` (colour only), `badge` (original colours and a badge) or `original` (the app's own icon) |
 | `-Appearance A` | `system` (default), `light` or `dark`. Works for apps that follow Windows' light or dark setting; apps with their own theme setting keep it per profile anyway. |
+| `-Proxy P` | `socks5://host:port`, `http://host:port` or `https://host:port`: the profile's traffic goes through it, and if it's down the profile is offline rather than going around it (see [Proxy and kill switch](#proxy-and-kill-switch)). `-Proxy none` with `change` removes it. |
 | `-DataDir DIR` | Keep the profile's data in another folder |
 | `-AdoptDataDir` | Use a data folder that already has data in it |
 | `-ShortcutDir DIR` | Put the shortcut somewhere other than the Start menu |
+
+## Proxy and kill switch
+
+Give a profile a proxy, for example the local SOCKS port of your VPN or xray
+client, and check where its traffic comes out:
+
+```powershell
+.\twinbar.cmd new -App Postman -Name Work -Proxy socks5://127.0.0.1:10808
+.\twinbar.cmd ip "Postman Work"
+```
+
+The proxy is strict, so it works as a kill switch for the app's web traffic:
+Chromium never falls back to a direct connection, host names are looked up
+through the proxy (only the proxy's own name and localhost are looked up on
+your computer), and WebRTC can't send UDP around it. If the proxy is down, the
+profile is offline. For normal and Squirrel installs Twinbar also sets
+`HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` for the app's code outside
+Chromium; Windows doesn't let Store apps be given these. Store apps also go
+without the "look nothing up locally" rule, because Claude doesn't start with
+it; their connections still go only through the proxy, but some names may be
+looked up through your normal DNS server.
+
+What some apps do in their own Node.js code can still go around it, since that
+code doesn't use Chromium's network stack. Measured on Windows 11 with a local
+SOCKS5 proxy that logs every destination, watching every TCP connection of the
+app for 30 seconds:
+
+| App | Through the proxy | Around it | Proxy down |
+|---|---|---|---|
+| Postman 12.33 | all 7 destinations | nothing | nothing gets out |
+| Bruno 4.3 | its web traffic | one connection from its main process, to an Amazon (AWS) server | that one connection still gets out |
+| Claude 6.28 (Store) | all 9 destinations (claude.ai, Anthropic, hCaptcha) | nothing | nothing gets out |
+
+Stopping that last kind of traffic needs a firewall rule, which needs admin
+rights and applies to the app's program file, so it would cut off the
+original app too; for that, use your VPN client's own kill switch.
+`tests\smoke.ps1 -RealApp <app> -Launch` measures any app the same way.
 
 ## How it works
 
@@ -183,6 +222,11 @@ data folder is only ever removed if it carries that profile's marker.
   key that's in there too), so each profile signs in on its own. Claude also
   refers to fixed folders (`%LOCALAPPDATA%\Claude-Data` and `Claude-3p`);
   whatever it keeps there is shared with the original Claude.
+- **Two Claudes at once** compete for things Claude expects to have to itself:
+  its global shortcut (Ctrl+Alt+Space), its Windows service and those shared
+  folders. A Claude profile's own log shows it, and it can make the second
+  copy slow; Twinbar's own launcher uses well under 1% of one CPU core. For a
+  second Claude account, claude.ai in a browser is lighter.
 - **Appearance** only reaches apps that follow Windows' light or dark setting.
 - **Window icon:** it's set by the launcher, so if the launcher is stopped while
   the profile is open, the window shows a blank icon until the profile is

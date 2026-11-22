@@ -164,6 +164,23 @@ uninstall. Not code-signed: a certificate costs money, so for now Windows
 SmartScreen asks once ("More info", "Run anyway"). A double-click on
 `twinbar.cmd` now opens the window too.
 
+Added in 0.6.0: a proxy per profile (`-Proxy`, the window's Proxy field) and
+`twinbar ip` / Check IP. The proxy is passed as Chromium switches, strict so it
+doubles as a kill switch for the app's web traffic: `--proxy-server` (no fallback
+to direct), `--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE <proxy> , EXCLUDE
+localhost` (no local DNS) and `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`;
+plus `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` from the launcher where Windows allows
+it (not for Store apps). The IP check uses its own small client (SOCKS5 with the
+name, or HTTP CONNECT, then TLS) so it goes the same way as the profile. Measured
+with a logging SOCKS5 proxy and every TCP connection of the app for 30 s:
+Postman all through it, nothing around it, nothing out with the proxy down;
+Bruno's web traffic through it, but one connection from its Node.js main process
+goes around it (and out, with the proxy down); Claude (Store) doesn't start with
+the DNS rule, so Store apps go without it, and then all through it, nothing
+around it, nothing out with the proxy down. Also measured, for a slow Claude
+profile: Twinbar's launcher used 0.5% of one core; the second Claude itself
+collides with the first over its global shortcut, its service and shared folders.
+
 Left out, on purpose: winget. Its manifests live in Microsoft's
 `winget-pkgs` repository, so publishing there means a pull request there from
 the owner's account; the zip and its hash are what it would need.

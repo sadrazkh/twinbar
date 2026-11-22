@@ -4,8 +4,9 @@ Twinbar: a second, separately signed-in copy of an Electron app on Windows.
 
 .DESCRIPTION
   twinbar new -App APP -Name NAME [-Color C] [-Badge B] [-Style S] [-Appearance A]
-              [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
-  twinbar change PROFILE [-Color C] [-Badge B] [-Style S] [-Appearance A]
+              [-Proxy P] [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
+  twinbar change PROFILE [-Color C] [-Badge B] [-Style S] [-Appearance A] [-Proxy P]
+  twinbar ip [PROFILE] [-Json]
   twinbar rebuild PROFILE [-App APP] | twinbar rebuild -All
   twinbar doctor [PROFILE]
   twinbar list [-Json]
@@ -35,6 +36,7 @@ param(
   [string] $Badge,
   [string] $Style,
   [string] $Appearance,
+  [string] $Proxy,
   [string] $DataDir,
   [switch] $AdoptDataDir,
   [string] $ShortcutDir,
@@ -48,7 +50,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.5.1'
+$script:TwinbarVersion = '0.6.0'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
@@ -69,7 +71,7 @@ $script:Appearances = [ordered]@{
 # Every field of a profile record, in the order they're written.
 $script:RecordFields = @(
   'schema', 'id', 'name', 'appName', 'appId', 'appKind', 'launchExe', 'realExe', 'packageApp',
-  'dataDir', 'shortcut', 'aumid', 'launcher', 'style', 'color', 'badge', 'appearance', 'extraArgs',
+  'dataDir', 'shortcut', 'aumid', 'launcher', 'style', 'color', 'badge', 'appearance', 'proxy', 'extraArgs',
   'icon', 'created', 'updated', 'twinbarVersion'
 )
 
@@ -86,8 +88,11 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.IO;
+using System.Net.Security;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
+using System.Security.Authentication;
 using System.Text;
 
 namespace TwinbarInterop {
@@ -301,6 +306,112 @@ namespace TwinbarInterop {
         }
       } finally {
         Marshal.ReleaseComObject(store);
+      }
+    }
+  }
+
+  // A small HTTP(S) client that goes the way a profile's traffic goes: through its
+  // proxy (SOCKS5, which also resolves the name, or HTTP CONNECT), or directly.
+  // Used to see which IP address the world sees for a profile.
+  public static class Net {
+    static byte[] ReadExactly(Stream s, int count) {
+      byte[] buffer = new byte[count];
+      int done = 0;
+      while (done < count) {
+        int n = s.Read(buffer, done, count - done);
+        if (n <= 0) throw new IOException("the connection closed early");
+        done += n;
+      }
+      return buffer;
+    }
+
+    static string ReadHeaderBlock(Stream s) {
+      StringBuilder text = new StringBuilder();
+      while (!text.ToString().EndsWith("\r\n\r\n")) {
+        int b = s.ReadByte();
+        if (b < 0) throw new IOException("the connection closed early");
+        text.Append((char)b);
+        if (text.Length > 16384) throw new IOException("the proxy's answer is too long");
+      }
+      return text.ToString();
+    }
+
+    static TcpClient Connect(string host, int port, int timeoutMs) {
+      TcpClient client = new TcpClient();
+      IAsyncResult pending = client.BeginConnect(host, port, null, null);
+      if (!pending.AsyncWaitHandle.WaitOne(timeoutMs)) {
+        client.Close();
+        throw new IOException("no answer from " + host + ":" + port);
+      }
+      client.EndConnect(pending);
+      client.ReceiveTimeout = timeoutMs;
+      client.SendTimeout = timeoutMs;
+      return client;
+    }
+
+    // Returns the body of url (http:// or https://), fetched through proxy ("" for none).
+    public static string Fetch(string url, string proxy, int timeoutMs) {
+      Uri target = new Uri(url);
+      bool tls = target.Scheme == "https";
+      int port = target.Port;
+      TcpClient client;
+      Stream stream;
+      if (String.IsNullOrEmpty(proxy)) {
+        client = Connect(target.Host, port, timeoutMs);
+        stream = client.GetStream();
+      } else {
+        Uri p = new Uri(proxy);
+        string proxyHost = p.Host.Trim('[', ']');
+        client = Connect(proxyHost, p.Port, timeoutMs);
+        stream = client.GetStream();
+        if (p.Scheme == "socks5") {
+          stream.Write(new byte[] { 5, 1, 0 }, 0, 3);
+          byte[] hello = ReadExactly(stream, 2);
+          if (hello[0] != 5 || hello[1] != 0) throw new IOException("the SOCKS5 proxy wants a sign-in method Twinbar doesn't speak");
+          byte[] name = Encoding.ASCII.GetBytes(target.Host);
+          MemoryStream request = new MemoryStream();
+          request.Write(new byte[] { 5, 1, 0, 3, (byte)name.Length }, 0, 5);
+          request.Write(name, 0, name.Length);
+          request.WriteByte((byte)(port >> 8));
+          request.WriteByte((byte)(port & 255));
+          stream.Write(request.ToArray(), 0, (int)request.Length);
+          byte[] reply = ReadExactly(stream, 4);
+          if (reply[1] != 0) throw new IOException("the SOCKS5 proxy couldn't connect (code " + reply[1] + ")");
+          int rest = reply[3] == 1 ? 4 : reply[3] == 4 ? 16 : ReadExactly(stream, 1)[0];
+          ReadExactly(stream, rest + 2);
+        } else {
+          if (p.Scheme == "https") {
+            SslStream toProxy = new SslStream(stream);
+            toProxy.AuthenticateAsClient(proxyHost, null, SslProtocols.None, true);
+            stream = toProxy;
+          }
+          byte[] connect = Encoding.ASCII.GetBytes("CONNECT " + target.Host + ":" + port + " HTTP/1.1\r\nHost: " + target.Host + ":" + port + "\r\n\r\n");
+          stream.Write(connect, 0, connect.Length);
+          string answer = ReadHeaderBlock(stream);
+          string status = answer.Split(new string[] { "\r\n" }, StringSplitOptions.None)[0];
+          if (!status.Contains(" 200")) throw new IOException("the proxy said: " + status);
+        }
+      }
+      try {
+        if (tls) {
+          SslStream secure = new SslStream(stream);
+          secure.AuthenticateAsClient(target.Host, null, SslProtocols.None, true);
+          stream = secure;
+        }
+        byte[] get = Encoding.ASCII.GetBytes("GET " + target.PathAndQuery + " HTTP/1.0\r\nHost: " + target.Host +
+          "\r\nUser-Agent: twinbar\r\nAccept: application/json\r\nConnection: close\r\n\r\n");
+        stream.Write(get, 0, get.Length);
+        MemoryStream body = new MemoryStream();
+        stream.CopyTo(body);
+        string response = Encoding.UTF8.GetString(body.ToArray());
+        int split = response.IndexOf("\r\n\r\n");
+        if (split < 0) throw new IOException("no answer from " + target.Host);
+        string statusLine = response.Substring(0, response.IndexOf("\r\n"));
+        if (!statusLine.Contains(" 200")) throw new IOException(target.Host + " said: " + statusLine);
+        return response.Substring(split + 4);
+      } finally {
+        stream.Dispose();
+        client.Close();
       }
     }
   }
@@ -772,7 +883,7 @@ namespace TwinbarLauncher {
     const uint WmGetIcon = 0x7F, WmSetIcon = 0x80, AbortIfHung = 2;
 
     static string logPath, profileId, appId, displayName, relaunchCommand, iconResource, iconFile;
-    static string launchExe, appKind, packageApp, exeBaseName, extraArgs, dataDir;
+    static string launchExe, appKind, packageApp, exeBaseName, extraArgs, dataDir, proxy;
     static readonly Dictionary<int, IntPtr> iconsBySize = new Dictionary<int, IntPtr>();
     static Regex dataDirArgument;
     static IntPtr mainProcess = IntPtr.Zero, hook = IntPtr.Zero;
@@ -815,6 +926,7 @@ namespace TwinbarLauncher {
       appKind = Text(record, "appKind");
       packageApp = Text(record, "packageApp");
       extraArgs = Text(record, "extraArgs");
+      proxy = Text(record, "proxy");
       exeBaseName = Path.GetFileNameWithoutExtension(Text(record, "realExe"));
       displayName = Text(record, "appName") + " " + Text(record, "name");
       iconFile = Text(record, "icon");
@@ -863,6 +975,13 @@ namespace TwinbarLauncher {
       ProcessStartInfo info = new ProcessStartInfo(launchExe, arguments);
       info.UseShellExecute = false;
       info.WorkingDirectory = Path.GetDirectoryName(launchExe);
+      if (proxy.Length > 0) {
+        // For the app's own code outside Chromium (Node.js), where it honours these.
+        info.EnvironmentVariables["HTTPS_PROXY"] = proxy;
+        info.EnvironmentVariables["HTTP_PROXY"] = proxy;
+        info.EnvironmentVariables["ALL_PROXY"] = proxy;
+        info.EnvironmentVariables["NO_PROXY"] = "localhost,127.0.0.1,::1";
+      }
       using (Process.Start(info)) { }
     }
 
@@ -1486,6 +1605,39 @@ function Resolve-Style([string] $Value) {
   return $v
 }
 
+# A proxy for a profile: socks5://, http:// or https:// with a host and a port, or
+# "none" (also an empty value) for none. Returns the normalised value or "".
+function Resolve-ProxyValue([string] $Value) {
+  if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+  $v = $Value.Trim()
+  if ($v -in 'none', 'direct', 'off') { return '' }
+  $m = [regex]::Match($v, '^(?i)(socks5|http|https)://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):([0-9]{1,5})/?$')
+  if (-not $m.Success -or [int]$m.Groups[3].Value -lt 1 -or [int]$m.Groups[3].Value -gt 65535) {
+    Stop-Twinbar "the proxy must look like socks5://127.0.0.1:10808 or http://host:8080 (or none)"
+  }
+  return '{0}://{1}:{2}' -f $m.Groups[1].Value.ToLowerInvariant(), $m.Groups[2].Value, $m.Groups[3].Value
+}
+
+# Chromium switches for a proxy, made strict so it works as a kill switch for the
+# app's web traffic: with a fixed proxy Chromium never falls back to a direct
+# connection; WebRTC can't use UDP around it; and, unless -NoDnsRule, no host name
+# is looked up locally (only the proxy and localhost are; the rest goes through it).
+# Measured: Claude from the Microsoft Store doesn't start with that DNS rule, so
+# Store apps go without it (their connections still only go through the proxy).
+function Get-ProxyArgs([string] $ProxyValue, [switch] $NoDnsRule) {
+  if (-not $ProxyValue) { return '' }
+  $proxyHost = ([regex]::Match($ProxyValue, '^[a-z0-9]+://(\[[^\]]+\]|[^:/]+)')).Groups[1].Value
+  $parts = @("--proxy-server=$ProxyValue")
+  if (-not $NoDnsRule) { $parts += ('"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE {0} , EXCLUDE localhost"' -f $proxyHost) }
+  $parts += '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'
+  return ($parts -join ' ')
+}
+
+function Get-ExtraArgs([string] $AppearanceValue, [string] $ProxyValue, [string] $AppKind) {
+  $proxyArgs = Get-ProxyArgs $ProxyValue -NoDnsRule:($AppKind -eq 'store')
+  return (@($script:Appearances[$AppearanceValue], $proxyArgs) | Where-Object { $_ }) -join ' '
+}
+
 function Resolve-Appearance([string] $Value) {
   if ([string]::IsNullOrWhiteSpace($Value)) { return 'system' }
   $v = $Value.Trim().ToLowerInvariant()
@@ -1812,7 +1964,7 @@ function Publish-Profile([System.Collections.IDictionary] $Record) {
     }
   }
   $Record.launcher = Initialize-Launcher
-  $Record.extraArgs = $script:Appearances[$Record.appearance]
+  $Record.extraArgs = Get-ExtraArgs $Record.appearance $Record.proxy $Record.appKind
   $oldIcon = $Record.icon
   # Store apps move with every update, so even their original icon gets a copy.
   if ($Record.style -ne 'original' -or $Record.appKind -eq 'store') {
@@ -1854,6 +2006,7 @@ function Get-LookNote($Record) {
     default { "the app's own icon" }
   }
   if ($Record.appearance -and $Record.appearance -ne 'system') { $look += "; always $($Record.appearance)" }
+  if ($Record.proxy) { $look += "; via $($Record.proxy)" }
   return $look
 }
 
@@ -1901,13 +2054,14 @@ function Get-ProfileStatus($Record) {
 function Invoke-New {
   param(
     [string] $AppPath, [string] $ProfileName, [string] $DataFolder, [switch] $Adopt, [string] $MenuDir,
-    [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName
+    [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName, [string] $ProxyValue
   )
 
   $label = Test-ProfileName $ProfileName
   $look = Resolve-Style $StyleName
   $badgeValue = Get-BadgeText $BadgeText $label
   $appearanceValue = Resolve-Appearance $AppearanceName
+  $proxyChoice = Resolve-ProxyValue $ProxyValue
   $app = Resolve-ElectronApp $AppPath
   $key = Get-NameKey $label
   $id = "$($app.Id).$key"
@@ -1975,6 +2129,7 @@ function Invoke-New {
   $record.color = $colorHex
   $record.badge = $badgeValue
   $record.appearance = $appearanceValue
+  $record.proxy = $proxyChoice
   $record.created = (Get-Date).ToString('o')
 
   $createdDir = -not (Test-Path -LiteralPath $dd)
@@ -2029,9 +2184,9 @@ function Assert-NotRunning($Record) {
 }
 
 function Invoke-Change {
-  param([string] $Which, [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName)
-  if (-not ($ColorName -or $BadgeText -or $StyleName -or $AppearanceName)) {
-    Stop-Twinbar 'nothing to change; give -Color, -Badge, -Style or -Appearance'
+  param([string] $Which, [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName, [string] $ProxyValue)
+  if (-not ($ColorName -or $BadgeText -or $StyleName -or $AppearanceName -or $ProxyValue)) {
+    Stop-Twinbar 'nothing to change; give -Color, -Badge, -Style, -Appearance or -Proxy'
   }
   $p = Find-Profile $Which
   Assert-NotRunning $p
@@ -2040,6 +2195,7 @@ function Invoke-Change {
   if ($ColorName) { $record.color = Resolve-ProfileColor $ColorName $record.id }
   if ($BadgeText) { $record.badge = Get-BadgeText $BadgeText $record.name }
   if ($AppearanceName) { $record.appearance = Resolve-Appearance $AppearanceName }
+  if ($ProxyValue) { $record.proxy = Resolve-ProxyValue $ProxyValue }
   $pins = Publish-Profile $record
   "Changed ""$($record.appName) $($record.name)"": $(Get-LookNote $record)."
   if ($pins) { "  Updated $pins taskbar pin(s)." }
@@ -2081,6 +2237,80 @@ function Invoke-Rebuild([string] $Which, [string] $AppPath, [switch] $Every) {
     }
   }
   if ($failed.Count) { Stop-Twinbar "couldn't rebuild: $($failed -join ', ')" }
+}
+
+function Test-TcpPort([string] $TargetHost, [int] $Port, [int] $TimeoutMs) {
+  $client = New-Object Net.Sockets.TcpClient
+  try {
+    $pending = $client.BeginConnect($TargetHost, $Port, $null, $null)
+    if (-not $pending.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $false }
+    $client.EndConnect($pending)
+    return $true
+  } catch {
+    return $false
+  } finally {
+    $client.Close()
+  }
+}
+
+# Services that answer with the caller's IP address (and where it is), tried in order.
+$script:IpServices = @('https://ipinfo.io/json', 'https://api.ipify.org?format=json')
+
+# The IP address the world sees for traffic through ProxyValue ("" for directly).
+function Get-IpInfo([string] $ProxyValue) {
+  Initialize-Interop
+  $urls = if ($env:TWINBAR_IP_URL) { @($env:TWINBAR_IP_URL) } else { $script:IpServices }
+  $problem = ''
+  foreach ($url in $urls) {
+    try {
+      $answer = [TwinbarInterop.Net]::Fetch($url, $ProxyValue, 15000) | ConvertFrom-Json
+      $where = @((Get-RecordValue $answer 'city'), (Get-RecordValue $answer 'region'), (Get-RecordValue $answer 'country')) | Where-Object { $_ }
+      return [pscustomobject]@{
+        Ok = $true; Ip = (Get-RecordValue $answer 'ip'); Where = (@($where) -join ', '); Network = (Get-RecordValue $answer 'org'); Error = ''
+      }
+    } catch {
+      $e = $_.Exception
+      while ($e.InnerException) { $e = $e.InnerException }
+      $problem = $e.Message
+    }
+  }
+  return [pscustomobject]@{ Ok = $false; Ip = ''; Where = ''; Network = ''; Error = $problem }
+}
+
+# Which IP address a profile's traffic comes from, next to the one without a proxy.
+function Invoke-Ip([string] $Which, [switch] $AsJson) {
+  $checks = @()
+  $hasProxy = $false
+  if ($Which) {
+    $p = ConvertTo-ProfileTable (Find-Profile $Which)
+    $hasProxy = [bool]$p.proxy
+    $route = if ($hasProxy) { "through $($p.proxy)" } else { 'directly (it has no proxy)' }
+    $checks += [pscustomobject]@{ Name = "$($p.appName) $($p.name)"; Route = $route; Proxy = $p.proxy; Info = (Get-IpInfo $p.proxy) }
+  }
+  if (-not $Which -or $hasProxy) {
+    $checks += [pscustomobject]@{ Name = 'Without a proxy'; Route = 'directly, like the original app'; Proxy = ''; Info = (Get-IpInfo '') }
+  }
+  if ($AsJson) {
+    $rows = @($checks | ForEach-Object {
+        [pscustomobject]@{ name = $_.Name; route = $_.Route; proxy = $_.Proxy; ok = $_.Info.Ok; ip = $_.Info.Ip; where = $_.Info.Where; network = $_.Info.Network; error = $_.Info.Error }
+      })
+    return (ConvertTo-Json -InputObject $rows -Depth 3)
+  }
+  foreach ($c in $checks) {
+    "$($c.Name), $($c.Route):"
+    if ($c.Info.Ok) {
+      $line = "  IP $($c.Info.Ip)"
+      if ($c.Info.Where) { $line += "   $($c.Info.Where)" }
+      if ($c.Info.Network) { $line += "   ($($c.Info.Network))" }
+      $line
+    } else {
+      "  can't get out: $($c.Info.Error)"
+      if ($c.Proxy) { '  So the profile is offline too until the proxy works: the kill switch keeps it from going around it.' }
+    }
+  }
+  if ($checks.Count -eq 2 -and $checks[0].Info.Ok -and $checks[1].Info.Ok -and $checks[0].Info.Ip -eq $checks[1].Info.Ip) {
+    'Note: both are the same IP address, so the proxy goes out through this same connection.'
+  }
 }
 
 # Checks Twinbar and its profiles, and says what to do about anything wrong.
@@ -2147,6 +2377,11 @@ function Invoke-Doctor([string] $Which) {
     }
     if ($r.appKind -eq 'store' -and $r.dataDir.StartsWith([Environment]::GetFolderPath('ApplicationData'), [StringComparison]::OrdinalIgnoreCase)) {
       & $warn "data: a Store app's data under AppData is redirected by Windows into the app's package; Twinbar can't remove it there"
+    }
+    if ($r.proxy) {
+      $proxyUri = [Uri]$r.proxy
+      if (Test-TcpPort $proxyUri.Host.Trim('[', ']') $proxyUri.Port 2000) { & $ok "proxy: $($r.proxy) answers" }
+      else { & $warn "proxy: $($r.proxy) doesn't answer, so the profile stays offline until it does (that's the kill switch)" }
     }
     if (@(Get-ProfileProcesses $p).Count) {
       if (@(Get-ProfileLaunchers $r.id).Count) { & $ok 'running, looked after by the launcher' }
@@ -2362,7 +2597,7 @@ function Get-SelectedRow {
 
 function Update-GuiButtons {
   $has = $null -ne (Get-SelectedRow)
-  foreach ($name in 'Edit', 'Open', 'Remove', 'Repair') { $script:Gui.Buttons[$name].Enabled = $has }
+  foreach ($name in 'Edit', 'Open', 'Remove', 'Repair', 'Ip') { $script:Gui.Buttons[$name].Enabled = $has }
 }
 
 # Fills the list; with -Quiet (the timer), only refreshes the statuses unless
@@ -2443,8 +2678,9 @@ function New-MainForm {
   $g.Buttons.Open = New-GuiButton 'Open' { Open-SelectedProfile }
   $g.Buttons.Remove = New-GuiButton 'Remove...' { $row = Get-SelectedRow; if ($row) { Show-RemoveDialog $row } }
   $g.Buttons.Repair = New-GuiButton 'Repair' { Repair-SelectedProfile }
+  $g.Buttons.Ip = New-GuiButton 'Check IP' { Show-IpCheck }
   $g.Buttons.Check = New-GuiButton 'Check all' { Show-CheckDialog }
-  foreach ($name in 'New', 'Edit', 'Open', 'Remove', 'Repair', 'Check') { $buttons.Controls.Add($g.Buttons[$name]) }
+  foreach ($name in 'New', 'Edit', 'Open', 'Remove', 'Repair', 'Ip', 'Check') { $buttons.Controls.Add($g.Buttons[$name]) }
 
   $list.Add_SelectedIndexChanged({ Update-GuiButtons })
   $list.Add_DoubleClick({ Open-SelectedProfile })
@@ -2547,6 +2783,25 @@ function Show-TextDialog([string] $Title, [string] $Text) {
   $d.AcceptButton = $close
   $d.CancelButton = $close
   try { [void]$d.ShowDialog($script:Gui.Form) } finally { $d.Dispose() }
+}
+
+function Show-IpCheck {
+  $row = Get-SelectedRow
+  if (-not $row) { return }
+  $form = $script:Gui.Form
+  $lines = New-Object System.Collections.Generic.List[string]
+  $form.UseWaitCursor = $true
+  Set-GuiStatus "Checking the IP address of $($row.FullName)..."
+  [Windows.Forms.Application]::DoEvents()
+  try {
+    Invoke-Ip $row.Id | ForEach-Object { $lines.Add([string]$_) }
+  } catch {
+    $lines.Add((ConvertTo-Sentence $_.Exception.Message))
+  } finally {
+    $form.UseWaitCursor = $false
+    Set-GuiStatus ''
+  }
+  Show-TextDialog "IP address of $($row.FullName)" ($lines -join "`r`n")
 }
 
 function Show-CheckDialog {
@@ -2730,18 +2985,21 @@ function New-ProfileDialog($Row) {
   $appearance.DropDownStyle = 'DropDownList'
   $appearance.Width = $wide
   foreach ($key in $script:AppearanceNames.Keys) { [void]$appearance.Items.Add($key) }
+  $proxy = New-Object Windows.Forms.TextBox
+  $proxy.Width = $wide
   $preview = New-Object Windows.Forms.PictureBox
   $preview.Size = New-Object Drawing.Size((Get-Scaled 128), (Get-Scaled 128))
   $preview.SizeMode = 'Zoom'
   $preview.Margin = New-Object Windows.Forms.Padding((Get-Scaled 16), 0, 0, 0)
   $hint = New-Object Windows.Forms.Label
-  $hint.Text = "Leave the badge empty for the name's first letter. Light and dark work for apps that follow Windows."
+  $hint.Text = "Leave the badge empty for the name's first letter. Light and dark work for apps that follow Windows. " +
+    'Proxy: like socks5://127.0.0.1:10808 or http://host:8080, or empty for none; if it is down, the profile stays offline.'
   $hint.AutoSize = $true
   $hint.MaximumSize = New-Object Drawing.Size(($wide + (Get-Scaled 90)), 0)
   $hint.ForeColor = [Drawing.SystemColors]::GrayText
 
   $rowIndex = 0
-  foreach ($pair in @(@('App', $appRow), @('Name', $name), @('Colour', $color), @('Badge', $badge), @('Icon', $style), @('Appearance', $appearance))) {
+  foreach ($pair in @(@('App', $appRow), @('Name', $name), @('Colour', $color), @('Badge', $badge), @('Icon', $style), @('Appearance', $appearance), @('Proxy', $proxy))) {
     $label = New-Object Windows.Forms.Label
     $label.Text = [string]$pair[0]
     $label.AutoSize = $true
@@ -2752,7 +3010,7 @@ function New-ProfileDialog($Row) {
     $rowIndex++
   }
   $grid.Controls.Add($preview, 2, 0)
-  $grid.SetRowSpan($preview, 6)
+  $grid.SetRowSpan($preview, 7)
   $grid.Controls.Add($hint, 1, $rowIndex)
   $grid.SetColumnSpan($hint, 2)
   $rowIndex++
@@ -2775,7 +3033,7 @@ function New-ProfileDialog($Row) {
   $appList = New-Object System.Collections.Generic.List[object]
   $state = @{
     Form = $d; Row = $Row; App = $app; AppList = $appList; Browse = $browse; Name = $name; Color = $color
-    Badge = $badge; Style = $style; Appearance = $appearance; Preview = $preview; Ok = $ok; ColorPicked = $false; Updating = $true
+    Badge = $badge; Style = $style; Appearance = $appearance; Proxy = $proxy; Preview = $preview; Ok = $ok; ColorPicked = $false; Updating = $true
   }
   $script:Dialog = $state
 
@@ -2789,6 +3047,7 @@ function New-ProfileDialog($Row) {
     $name.Text = $r.name
     $name.Enabled = $false
     $badge.Text = $r.badge
+    $proxy.Text = $r.proxy
     Select-ColorItem $color $r.color
     $style.SelectedItem = @($script:StyleNames.Keys | Where-Object { $script:StyleNames[$_] -eq $r.style })[0]
     $appearance.SelectedItem = @($script:AppearanceNames.Keys | Where-Object { $script:AppearanceNames[$_] -eq $r.appearance })[0]
@@ -2876,10 +3135,12 @@ function Submit-ProfileDialog($State) {
   $hex = Get-ColorItemHex ([string]$State.Color.SelectedItem)
   $look = $script:StyleNames[[string]$State.Style.SelectedItem]
   $theme = $script:AppearanceNames[[string]$State.Appearance.SelectedItem]
+  $route = $State.Proxy.Text.Trim()
   if ($State.Row) {
     $id = $State.Row.Id
     $letters = Get-DialogBadge $State
-    return (Invoke-GuiAction { Invoke-Change -Which $id -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme } $State.Form)
+    $routeOrNone = if ($route) { $route } else { 'none' }
+    return (Invoke-GuiAction { Invoke-Change -Which $id -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme -ProxyValue $routeOrNone } $State.Form)
   }
   $chosen = Get-DialogApp $State
   if (-not $chosen) {
@@ -2889,7 +3150,7 @@ function Submit-ProfileDialog($State) {
   $source = $chosen.Source
   $label = $State.Name.Text
   $letters = $State.Badge.Text.Trim()
-  return (Invoke-GuiAction { Invoke-New -AppPath $source -ProfileName $label -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme } $State.Form)
+  return (Invoke-GuiAction { Invoke-New -AppPath $source -ProfileName $label -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme -ProxyValue $route } $State.Form)
 }
 
 function Show-ProfileDialog($Row) {
@@ -2928,7 +3189,7 @@ function Show-Help {
 Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Electron app.
 
   twinbar new -App APP -Name NAME [-Color C] [-Badge B] [-Style S] [-Appearance A]
-              [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
+              [-Proxy P] [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
       Make a profile. APP is the app's .exe, install folder or Start menu
       shortcut, or a Microsoft Store app's name ("Claude"). Adds "<App> <Name>"
       to the Start menu; the app then keeps that profile's sign-in, settings
@@ -2938,8 +3199,15 @@ Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Ele
         -Badge       1 or 2 letters or digits (default: the name's first letter)
         -Style       tint+badge (default), tint, badge, or original (the app's icon)
         -Appearance  system (default), light or dark, for apps that follow Windows
-  twinbar change PROFILE [-Color C] [-Badge B] [-Style S] [-Appearance A]
-      Change a profile's icon or appearance. Its name and data stay.
+        -Proxy       socks5://host:port, http://host:port or https://host:port: the
+                     profile's web traffic goes only through it (if it's down, the
+                     profile is offline rather than going around it)
+  twinbar change PROFILE [-Color C] [-Badge B] [-Style S] [-Appearance A] [-Proxy P]
+      Change a profile's icon, appearance or proxy (-Proxy none removes it).
+      Its name and data stay.
+  twinbar ip [PROFILE] [-Json]
+      Show the IP address a profile's traffic comes from (through its proxy),
+      next to the one without a proxy.
   twinbar rebuild PROFILE [-App APP]
   twinbar rebuild -All
       Make a profile's shortcut, icon and launcher again: after the app moved
@@ -3004,9 +3272,10 @@ function Invoke-Twinbar {
     'new' {
       $profileName = if ($Name) { $Name } else { $Target }
       Invoke-New -AppPath $App -ProfileName $profileName -DataFolder $DataDir -Adopt:$AdoptDataDir -MenuDir $ShortcutDir `
-        -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance
+        -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance -ProxyValue $Proxy
     }
-    'change' { Invoke-Change -Which $Target -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance }
+    'change' { Invoke-Change -Which $Target -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance -ProxyValue $Proxy }
+    'ip' { Invoke-Ip $Target -AsJson:$Json }
     'rebuild' { Invoke-Rebuild -Which $Target -AppPath $App -Every:$All }
     'doctor' { Invoke-Doctor $Target }
     'apps' { Invoke-Apps -AsJson:$Json }

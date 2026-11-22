@@ -6,6 +6,28 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-22
+
+A proxy for each profile, with a kill switch, and an IP check.
+
+### Added
+
+- `-Proxy socks5://host:port` (or `http://`, `https://`) for `new` and
+  `change`, and a Proxy field in the window; `-Proxy none` removes it. The
+  profile's web traffic then goes only through it, and it's strict, so it
+  works as a kill switch: Chromium never falls back to a direct connection,
+  names are looked up through the proxy (only the proxy and localhost are
+  looked up locally), and WebRTC can't send UDP around it. If the proxy is
+  down, the profile is offline. For normal and Squirrel installs, the
+  launcher also sets `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` for the app's
+  code outside Chromium (Windows doesn't let Store apps be given these).
+  Store apps go without the DNS rule: Claude from the Microsoft Store doesn't
+  start with it (measured); its connections still go only through the proxy.
+- `twinbar ip [PROFILE]` and a Check IP button: the IP address, place and
+  network the world sees for the profile (through its proxy, the same way its
+  traffic goes), next to the one without a proxy.
+- `doctor` checks that a profile's proxy answers.
+
 ## [0.5.1] - 2026-11-22
 
 A Windows installer.

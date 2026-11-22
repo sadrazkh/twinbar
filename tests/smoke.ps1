@@ -36,6 +36,7 @@ $storeData = if ($root.StartsWith([Environment]::GetFolderPath('UserProfile') + 
 $script:passed = 0
 $script:failed = 0
 $script:fakeBuilt = $null
+$script:extraEnv = @{} # more environment variables for Invoke-Cli
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -100,6 +101,7 @@ function Invoke-Cli([string[]] $Arguments, [string] $Script = $cli) {
   $psi.EnvironmentVariables['TWINBAR_STORE_DATA'] = $storeData
   $psi.EnvironmentVariables['TWINBAR_SHORTCUT_DIR'] = $menu
   $psi.EnvironmentVariables['TWINBAR_START_MENU'] = $startMenu
+  foreach ($key in $script:extraEnv.Keys) { $psi.EnvironmentVariables[$key] = $script:extraEnv[$key] }
   $proc = [Diagnostics.Process]::Start($psi)
   $out = $proc.StandardOutput.ReadToEndAsync()
   $err = $proc.StandardError.ReadToEndAsync()
@@ -153,6 +155,32 @@ function Get-ProcessesFor([string] $DataDir) {
 function Get-LaunchersFor([string] $Id) {
   @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'twinbar-launcher.exe'" |
       Where-Object { $_.CommandLine -match ('\s' + [regex]::Escape($Id) + '\s*$') })
+}
+
+# Internet connections (not to this computer) that a profile's app processes have
+# open, collected for a while: "process -> address:port".
+function Get-OutsideConnections([string] $DataDir, [int] $Seconds) {
+  $seen = @{}
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while ((Get-Date) -lt $deadline) {
+    $script:DataDirProcesses = $null
+    $ids = @(Get-ProfileProcesses ([pscustomobject]@{ dataDir = $DataDir }) | ForEach-Object { [int]$_.ProcessId })
+    if ($ids.Count) {
+      foreach ($c in @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object { $ids -contains $_.OwningProcess -and $_.State -in 'Established', 'SynSent' })) {
+        if ($c.RemoteAddress -notin '127.0.0.1', '::1', '::ffff:127.0.0.1', '0.0.0.0', '::') {
+          $seen["$($c.OwningProcess) -> $($c.RemoteAddress):$($c.RemotePort)"] = $true
+        }
+      }
+    }
+    Start-Sleep -Seconds 2
+  }
+  return @($seen.Keys)
+}
+
+function Stop-ProfileApp([string] $DataDir, [string] $Id) {
+  $script:DataDirProcesses = $null
+  Get-ProfileProcesses ([pscustomobject]@{ dataDir = $DataDir }) | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  [void](Wait-Until { @(Get-ProcessesFor $DataDir).Count -eq 0 -and @(Get-LaunchersFor $Id).Count -eq 0 } 25)
 }
 
 function Read-Record([string] $Id) {
@@ -213,7 +241,7 @@ try {
     [void][Management.Automation.Language.Parser]::ParseFile($file, [ref] $tokens, [ref] $errors)
     Assert-Equal 0 @($errors).Count "$(Split-Path -Leaf $file) parses"
   }
-  foreach ($file in @($cli, (Join-Path $repo 'twinbar.cmd'), $PSCommandPath, (Join-Path $PSScriptRoot 'FakeApp.cs'))) {
+  foreach ($file in @($cli, (Join-Path $repo 'twinbar.cmd'), $PSCommandPath, (Join-Path $PSScriptRoot 'FakeApp.cs'), (Join-Path $PSScriptRoot 'TestNet.cs'))) {
     $bytes = [IO.File]::ReadAllBytes($file)
     Assert-True (@($bytes | Where-Object { $_ -gt 127 }).Count -eq 0) "$(Split-Path -Leaf $file) is plain ASCII (Windows PowerShell reads it the same in any locale)"
   }
@@ -421,6 +449,22 @@ try {
   Assert-Equal 'dark' (Resolve-Appearance 'Dark') 'appearance: dark'
   Assert-Throws { Resolve-Appearance 'sepia' } 'appearance must be' 'appearance: an unknown one is refused'
   Assert-Equal '--force-dark-mode' $script:Appearances['dark'] 'appearance: dark is --force-dark-mode'
+  Assert-Equal 'socks5://127.0.0.1:10808' (Resolve-ProxyValue 'socks5://127.0.0.1:10808') 'proxy: socks5'
+  Assert-Equal 'http://Proxy.Example:8080' (Resolve-ProxyValue ' HTTP://Proxy.Example:8080/ ') 'proxy: http, tidied'
+  Assert-Equal 'https://[::1]:3128' (Resolve-ProxyValue 'https://[::1]:3128') 'proxy: https with an IPv6 address'
+  Assert-Equal '' (Resolve-ProxyValue 'none') 'proxy: none'
+  Assert-Equal '' (Resolve-ProxyValue '') 'proxy: empty is none'
+  foreach ($badProxy in 'socks4://h:1', 'socks5://h', 'socks5://h:70000', 'ftp://h:21', 'socks5://a b:1', 'socks5://user:pw@h:1') {
+    Assert-Throws { Resolve-ProxyValue $badProxy } 'proxy must look like' "proxy: '$badProxy' is refused"
+  }
+  $proxyArgs = Get-ProxyArgs 'socks5://127.0.0.1:10808'
+  Assert-True ($proxyArgs.Contains('--proxy-server=socks5://127.0.0.1:10808')) 'proxy switches: the proxy'
+  Assert-True ($proxyArgs.Contains('"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost"')) 'proxy switches: no name is looked up locally, but the proxy and localhost'
+  Assert-True ($proxyArgs.Contains('--force-webrtc-ip-handling-policy=disable_non_proxied_udp')) "proxy switches: WebRTC can't go around it"
+  Assert-Equal '' (Get-ProxyArgs '') 'proxy switches: none without a proxy'
+  Assert-True ((Get-ExtraArgs 'dark' 'http://h:1' 'standard') -match '^--force-dark-mode --proxy-server=http://h:1 ') 'appearance and proxy switches together'
+  $storeArgs = Get-ExtraArgs 'system' 'socks5://127.0.0.1:1' 'store'
+  Assert-True ($storeArgs -match '--proxy-server=socks5://127\.0\.0\.1:1' -and $storeArgs -match 'disable_non_proxied_udp' -and $storeArgs -notmatch 'host-resolver-rules') "Store apps: the proxy and WebRTC switches, without the DNS rule (Claude doesn't start with it)"
   Assert-Equal '--blink-settings=preferredColorScheme=1' $script:Appearances['light'] 'appearance: light prefers the light colour scheme'
 
   $old = [pscustomobject]@{ schema = 1; id = 'fakeapp.old'; name = 'Old'; appName = 'Fake App'; launchExe = $stdExe; realExe = $stdExe; dataDir = 'x'; shortcut = 'y'; aumid = 'Twinbar.fakeapp.old' }
@@ -717,6 +761,74 @@ try {
   Assert-Cli (Invoke-Cli @('list')) 0 'No profiles yet' 'no profiles left'
 
   # -------------------------------------------------------------------------
+  Write-Section 'Proxy and IP check'
+  Add-Type -TypeDefinition ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'TestNet.cs'))) -Language CSharp
+  $socksProxy = New-Object TestProxy $true
+  $httpProxy = New-Object TestProxy $false
+  $ipService = New-Object TestIpService '{"ip":"203.0.113.7","city":"Testville","country":"ZZ","org":"AS64500 Test Net"}'
+  $closed = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+  $closed.Start(); $closedPort = $closed.LocalEndpoint.Port; $closed.Stop()
+  $script:extraEnv['TWINBAR_IP_URL'] = "http://127.0.0.1:$($ipService.Port)/json"
+  $socksUrl = "socks5://127.0.0.1:$($socksProxy.Port)"
+  try {
+    Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Routed', '-Proxy', 'socks4://127.0.0.1:1080')) 1 'proxy must look like' 'new with a socks4 proxy fails'
+    $r = Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Routed', '-Proxy', $socksUrl)
+    Assert-Cli $r 0 ([regex]::Escape("via $socksUrl")) 'new with a SOCKS5 proxy'
+    $routed = Read-Record 'fakeapp.routed'
+    Assert-Equal $socksUrl $routed.proxy 'the record has the proxy'
+    $routedData = $routed.dataDir
+    [IO.File]::WriteAllText((Join-Path $routedData 'stay.txt'), 'keep running')
+    Assert-Cli (Invoke-Cli @('open', 'Routed')) 0 'Opening' 'open it'
+    $launchedFile = Join-Path $routedData 'launched.txt'
+    Assert-True (Wait-Until { Test-Path -LiteralPath $launchedFile } 20) 'it started'
+    if (Test-Path -LiteralPath $launchedFile) {
+      $lines = [IO.File]::ReadAllLines($launchedFile)
+      $commandLine = @($lines | Where-Object { $_ -like 'commandline=*' })[0]
+      Assert-True ($commandLine.Contains("--proxy-server=$socksUrl")) 'the app was given the proxy' $commandLine
+      Assert-True ($commandLine.Contains('"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost"')) 'and told not to look names up itself'
+      Assert-Equal "https_proxy=$socksUrl" (@($lines | Where-Object { $_ -like 'https_proxy=*' })[0]) "and HTTPS_PROXY for code outside Chromium"
+    }
+    $launcherLog = Join-Path $twHome 'logs\launcher.log'
+    Assert-True (Wait-Until { [IO.File]::ReadAllText($launcherLog) -match 'fakeapp\.routed: looking after process' } 15) 'the launcher found the app, proxy switches and all'
+    Remove-Item -LiteralPath (Join-Path $routedData 'stay.txt')
+    $quit = Wait-Until { @(Get-ProcessesFor $routedData).Count -eq 0 -and @(Get-LaunchersFor 'fakeapp.routed').Count -eq 0 } 30
+    $why = 'app processes: {0}; launchers: {1}; log: {2}' -f @(Get-ProcessesFor $routedData).Count, @(Get-LaunchersFor 'fakeapp.routed').Count,
+      ((Get-Content -LiteralPath (Join-Path $twHome 'logs\launcher.log') -Tail 4 -ErrorAction SilentlyContinue) -join ' | ')
+    Assert-True $quit 'it quit, and its launcher too' $why
+
+    $r = Invoke-Cli @('ip', 'Routed', '-Json')
+    Assert-Equal 0 $r.Code 'ip -Json'
+    $ipRows = @((ConvertFrom-Json $r.Out) | ForEach-Object { $_ })
+    Assert-Equal 2 $ipRows.Count 'ip: through the proxy, and without one'
+    if ($ipRows.Count -eq 2) {
+      Assert-True ($ipRows[0].ok -and $ipRows[0].ip -eq '203.0.113.7' -and $ipRows[0].where -eq 'Testville, ZZ' -and $ipRows[0].network -eq 'AS64500 Test Net') 'ip: the address, place and network the service saw' ($r.Out -replace '\s+', ' ')
+      Assert-True ($ipRows[1].ok -and $ipRows[1].proxy -eq '') 'ip: and without a proxy'
+    }
+    Assert-True ($socksProxy.Requests() -contains "127.0.0.1:$($ipService.Port)") 'ip: the check went through the SOCKS5 proxy, like the profile' (($socksProxy.Requests()) -join ', ')
+    Assert-Cli (Invoke-Cli @('ip', 'Routed')) 0 "through $([regex]::Escape($socksUrl)):\s+IP 203\.0\.113\.7\s+Testville, ZZ" 'ip: as text'
+    Assert-Cli (Invoke-Cli @('doctor', 'Routed')) 0 'proxy: .* answers' 'doctor: the proxy answers'
+
+    Assert-Cli (Invoke-Cli @('change', 'Routed', '-Proxy', "http://127.0.0.1:$($httpProxy.Port)")) 0 'via http://' 'change to an HTTP proxy'
+    Assert-Cli (Invoke-Cli @('ip', 'Routed')) 0 'IP 203\.0\.113\.7' 'ip through the HTTP proxy'
+    Assert-True ($httpProxy.Requests() -contains "127.0.0.1:$($ipService.Port)") 'ip: the check went through the HTTP proxy' (($httpProxy.Requests()) -join ', ')
+
+    Assert-Cli (Invoke-Cli @('change', 'Routed', '-Proxy', "socks5://127.0.0.1:$closedPort")) 0 'Changed' 'change to a proxy that is down'
+    $r = Invoke-Cli @('ip', 'Routed')
+    Assert-Cli $r 0 "can't get out" "ip: through a proxy that's down, nothing gets out"
+    Assert-Cli $r 0 'kill switch' 'ip: and it says the profile is offline too'
+    Assert-Cli (Invoke-Cli @('doctor', 'Routed')) 1 "doesn't answer.*kill switch" "doctor: the proxy doesn't answer"
+    Assert-Cli (Invoke-Cli @('change', 'Routed', '-Proxy', 'none')) 0 'Changed' 'change -Proxy none'
+    $plainAgain = Read-Record 'fakeapp.routed'
+    Assert-True ($plainAgain.proxy -eq '' -and $plainAgain.extraArgs -eq '') 'no proxy, and no proxy switches, any more'
+    $r = Invoke-Cli @('ip', '-Json')
+    Assert-Equal 1 @((ConvertFrom-Json $r.Out) | ForEach-Object { $_ }).Count 'ip without a profile: just the direct one'
+    Assert-Cli (Invoke-Cli @('remove', 'fakeapp.routed', '-DeleteData')) 0 'Removed' 'remove Routed'
+  } finally {
+    $script:extraEnv.Remove('TWINBAR_IP_URL')
+    $socksProxy.Stop(); $httpProxy.Stop(); $ipService.Stop()
+  }
+
+  # -------------------------------------------------------------------------
   Write-Section 'Finding apps'
   [void][IO.Directory]::CreateDirectory((Join-Path $startMenu 'Vendor'))
   Save-ShellLink -Path (Join-Path $startMenu 'Fake App.lnk') -TargetPath $stdExe
@@ -751,7 +863,7 @@ try {
     Assert-True (-not $script:Gui.Buttons.Edit.Enabled) 'Edit is off with nothing selected'
     $script:Gui.List.Items[0].Selected = $true
     [Windows.Forms.Application]::DoEvents()
-    Assert-True ($script:Gui.Buttons.Edit.Enabled -and $script:Gui.Buttons.Remove.Enabled) 'Edit and Remove come on with a profile selected'
+    Assert-True ($script:Gui.Buttons.Edit.Enabled -and $script:Gui.Buttons.Remove.Enabled -and $script:Gui.Buttons.Ip.Enabled) 'Edit, Remove and Check IP come on with a profile selected'
 
     $script:Gui.Apps = @([pscustomobject]@{ Name = 'Fake App'; Kind = 'standard'; Source = $stdExe; LaunchExe = $stdExe; Id = 'fakeapp' })
     $dialog = New-ProfileDialog $null
@@ -759,12 +871,13 @@ try {
     $dialog.Name.Text = 'Windowed'
     Assert-Equal (Resolve-ProfileColor '' 'fakeapp.windowed') (Get-ColorItemHex ([string]$dialog.Color.SelectedItem)) 'New: the colour follows the name, as on the command line'
     $dialog.Color.SelectedItem = 'Purple'
+    $dialog.Proxy.Text = 'socks5://127.0.0.1:9'
     Update-ProfilePreview $dialog
     Assert-True ($null -ne $dialog.Preview.Image) 'New: the icon is previewed'
     Assert-True ((Get-HueDistance (Get-MainHue (New-Object Drawing.Bitmap $dialog.Preview.Image)) 272) -lt 20) 'New: the preview is purple'
     Assert-True (Submit-ProfileDialog $dialog) 'New: Create makes the profile'
     $made = Read-Record 'fakeapp.windowed'
-    Assert-Equal '#8E4EC6|W|tint+badge' ('{0}|{1}|{2}' -f $made.color, $made.badge, $made.style) 'New: with the look picked in the window'
+    Assert-Equal '#8E4EC6|W|tint+badge|socks5://127.0.0.1:9' ('{0}|{1}|{2}|{3}' -f $made.color, $made.badge, $made.style, $made.proxy) 'New: with the look and proxy picked in the window'
     $dialog.Form.Dispose()
     Assert-Equal 2 $script:Gui.List.Items.Count 'the list shows the new profile'
 
@@ -779,12 +892,14 @@ try {
     $edit = New-ProfileDialog $row
     Assert-True (-not $edit.Name.Enabled -and -not $edit.App.Enabled) "Edit: the app and name can't change"
     Assert-Equal 'Purple' ([string]$edit.Color.SelectedItem) 'Edit: shows the colour'
+    Assert-Equal 'socks5://127.0.0.1:9' $edit.Proxy.Text 'Edit: shows the proxy'
+    $edit.Proxy.Text = ''
     Select-ColorItem $edit.Color '#123456'
     Assert-Equal '#123456' ([string]$edit.Color.SelectedItem) 'Edit: a custom colour'
     $edit.Appearance.SelectedItem = 'Dark'
     Assert-True (Submit-ProfileDialog $edit) 'Edit: Save changes it'
     $changedInWindow = Read-Record 'fakeapp.windowed'
-    Assert-Equal '#123456|dark|W' ('{0}|{1}|{2}' -f $changedInWindow.color, $changedInWindow.appearance, $changedInWindow.badge) 'Edit: with the new look'
+    Assert-Equal '#123456|dark|W|' ('{0}|{1}|{2}|{3}' -f $changedInWindow.color, $changedInWindow.appearance, $changedInWindow.badge, $changedInWindow.proxy) 'Edit: with the new look, and the proxy cleared'
     $edit.Form.Dispose()
 
     $removeDialog = New-RemoveDialog $row
@@ -833,9 +948,17 @@ try {
 
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Shown')) 0 'Made' 'a profile for the window'
   # (Not $app: the dot-sourced script has a [string] $App, and names ignore case.)
-  $appProcess = [Diagnostics.Process]::Start($appExe)
-  $windowUp = Wait-Until { $appProcess.Refresh(); $appProcess.MainWindowHandle -ne [IntPtr]::Zero } 90
-  Assert-True $windowUp 'Twinbar.exe opens its window'
+  # Twinbar opens one window at a time: with one already open (an installed Twinbar
+  # on this computer), a new Twinbar.exe just brings that one forward and ends.
+  $alreadyOpen = @(Get-Process -Name Twinbar -ErrorAction SilentlyContinue).Count -gt 0
+  $windowUp = $false
+  if ($alreadyOpen) {
+    Write-Host '  skip  opening Twinbar.exe: a Twinbar window is already open on this computer (close it to run these checks)'
+  } else {
+    $appProcess = [Diagnostics.Process]::Start($appExe)
+    $windowUp = Wait-Until { $appProcess.Refresh(); $appProcess.MainWindowHandle -ne [IntPtr]::Zero } 90
+    Assert-True $windowUp 'Twinbar.exe opens its window'
+  }
   if ($windowUp) {
     Assert-Equal 'Twinbar' $appProcess.MainWindowTitle 'titled Twinbar'
     # Windows PowerShell's UI Automation client only sees the window's controls as
@@ -876,7 +999,7 @@ public static class TwinbarTestWindows {
     [void]$appProcess.CloseMainWindow()
     Assert-True ($appProcess.WaitForExit(15000) -and $appProcess.ExitCode -eq 0) 'closing the window ends Twinbar.exe'
   }
-  if (-not $appProcess.HasExited) { $appProcess.Kill() }
+  if (-not $alreadyOpen -and -not $appProcess.HasExited) { $appProcess.Kill() }
   Assert-Cli (Invoke-Cli @('remove', 'fakeapp.shown', '-DeleteData')) 0 'Removed' 'remove Shown'
 
   $r = Invoke-Cli @('uninstall')
@@ -936,6 +1059,44 @@ public static class TwinbarTestWindows {
         Start-Sleep -Seconds 1 # let Windows release the files
       }
       Assert-Cli (Invoke-Cli @('remove', $rec.id, '-DeleteData')) 0 'Removed' 'remove it with its data'
+    }
+
+    if ($Launch) {
+      # Through a proxy: a local SOCKS5 proxy that relays to the internet and logs
+      # where it was asked to go; anything else the app connects to went around it.
+      Write-Section "Real app through a proxy: $RealApp"
+      if (-not ('TestProxy' -as [type])) { Add-Type -TypeDefinition ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'TestNet.cs'))) -Language CSharp }
+      $realProxy = New-Object TestProxy $true
+      $deadPort = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+      $deadPort.Start(); $deadNumber = $deadPort.LocalEndpoint.Port; $deadPort.Stop()
+      try {
+        $r = Invoke-Cli @('new', '-App', $RealApp, '-Name', 'Smoke Proxy', '-Proxy', "socks5://127.0.0.1:$($realProxy.Port)")
+        Assert-Cli $r 0 'Made' 'new Smoke Proxy'
+        $pr = @(Get-ListRows | Where-Object { $_.name -eq 'Smoke Proxy' })
+        if ($r.Code -eq 0 -and $pr.Count -eq 1) {
+          $pr = $pr[0]
+          Assert-Cli (Invoke-Cli @('open', $pr.id)) 0 'Opening' 'open it through the proxy'
+          $running = Wait-Until { @(Get-ProcessesFor $pr.dataDir).Count -gt 0 } 60
+          Assert-True $running 'it runs' ('launcher log: ' + ((Get-Content -LiteralPath (Join-Path $twHome 'logs\launcher.log') -Tail 5 -ErrorAction SilentlyContinue) -join ' | '))
+          $around = @(Get-OutsideConnections $pr.dataDir 30)
+          $through = @($realProxy.Requests() | Sort-Object -Unique)
+          Assert-True ($through.Count -gt 0) "its traffic went through the proxy ($($through.Count) destination(s))" (($through | Select-Object -First 8) -join ', ')
+          Write-Host ('        through the proxy: {0}' -f (($through | Select-Object -First 10) -join ', ')) -ForegroundColor DarkGray
+          Assert-True ($around.Count -eq 0) 'nothing went around the proxy' ("went around it: " + ($around -join ', '))
+          Stop-ProfileApp $pr.dataDir $pr.id
+
+          Assert-Cli (Invoke-Cli @('change', $pr.id, '-Proxy', "socks5://127.0.0.1:$deadNumber")) 0 'Changed' 'point it at a proxy that is down'
+          Assert-Cli (Invoke-Cli @('open', $pr.id)) 0 'Opening' 'open it again'
+          Assert-True (Wait-Until { @(Get-ProcessesFor $pr.dataDir).Count -gt 0 } 60) 'it runs'
+          $leaked = @(Get-OutsideConnections $pr.dataDir 30)
+          Assert-True ($leaked.Count -eq 0) 'with the proxy down, nothing gets out (the kill switch)' ("got out: " + ($leaked -join ', '))
+          Stop-ProfileApp $pr.dataDir $pr.id
+          Start-Sleep -Seconds 1
+          Assert-Cli (Invoke-Cli @('remove', $pr.id, '-DeleteData')) 0 'Removed' 'remove it with its data'
+        }
+      } finally {
+        $realProxy.Stop()
+      }
     }
   }
 } finally {
