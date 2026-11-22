@@ -54,6 +54,11 @@ function Assert-True([bool] $Condition, [string] $What, [string] $Detail = '') {
     $script:failed++
     Write-Host "  FAIL  $What" -ForegroundColor Red
     if ($Detail) { Write-Host "        $Detail" -ForegroundColor DarkGray }
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+      # Shown on the workflow run's page and in the checks API.
+      $message = ("$What. $Detail" -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+      Write-Host "::error title=Twinbar test failed::$message"
+    }
   }
 }
 
@@ -221,11 +226,36 @@ try {
   $version = ([regex]::Match([IO.File]::ReadAllText($cli), "TwinbarVersion = '([^']+)'")).Groups[1].Value
   Assert-True ([IO.File]::ReadAllText((Join-Path $repo 'CHANGELOG.md')).Contains("## [$version]")) "CHANGELOG.md has a section for $version"
   if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
-    $issues = @(Invoke-ScriptAnalyzer -Path $cli -Severity Warning, Error)
-    Assert-Equal 0 $issues.Count 'PSScriptAnalyzer finds no warnings or errors'
-    $issues | ForEach-Object { Write-Host "        $($_.RuleName) line $($_.Line): $($_.Message)" -ForegroundColor DarkGray }
+    $settings = Join-Path $repo 'PSScriptAnalyzerSettings.psd1'
+    foreach ($file in @($cli, $PSCommandPath)) {
+      $issues = @(Invoke-ScriptAnalyzer -Path $file -Settings $settings)
+      Assert-Equal 0 $issues.Count "PSScriptAnalyzer finds nothing in $(Split-Path -Leaf $file)"
+      $issues | ForEach-Object { Write-Host "        $($_.RuleName) line $($_.Line): $($_.Message)" -ForegroundColor DarkGray }
+    }
   } else {
     Write-Host '  skip  PSScriptAnalyzer (not installed)'
+  }
+
+  # -------------------------------------------------------------------------
+  Write-Section 'Release files'
+  $dist = Join-Path $root 'dist'
+  $notes = Join-Path $root 'notes.md'
+  $build = & $powershellExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'tools\make-release.ps1') -OutDir $dist -NotesPath $notes 2>&1
+  Assert-Equal 0 $LASTEXITCODE 'tools\make-release.ps1 builds them' ($build | Out-String)
+  $zipFile = Join-Path $dist "twinbar-$version.zip"
+  Assert-True (Test-Path -LiteralPath $zipFile) "twinbar-$version.zip"
+  if (Test-Path -LiteralPath $zipFile) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zipRead = [IO.Compression.ZipFile]::OpenRead($zipFile)
+    try { $entries = @($zipRead.Entries | ForEach-Object { $_.FullName }) } finally { $zipRead.Dispose() }
+    Assert-Equal 'CHANGELOG.md,LICENSE,README.md,twinbar.cmd,twinbar.ps1' (($entries | Sort-Object) -join ',') 'the zip has the script and its documents'
+    $scoop = [IO.File]::ReadAllText((Join-Path $dist 'twinbar.json')) | ConvertFrom-Json
+    Assert-Equal $version $scoop.version 'the Scoop manifest has the version'
+    Assert-Equal (Get-FileHash -LiteralPath $zipFile -Algorithm SHA256).Hash.ToLowerInvariant() $scoop.hash "the Scoop manifest has the zip's hash"
+    Assert-True ($scoop.url -like "*/releases/download/v$version/twinbar-$version.zip") 'and its download address'
+    $sumLines = @([IO.File]::ReadAllLines((Join-Path $dist 'SHA256SUMS')))
+    Assert-True ($sumLines -contains ('{0}  twinbar-{1}.zip' -f $scoop.hash, $version)) 'SHA256SUMS has the zip'
+    Assert-True ([IO.File]::ReadAllText($notes) -match 'scoop install' -and [IO.File]::ReadAllText($notes) -match '### ') "the release notes have the version's changes and how to install"
   }
 
   # -------------------------------------------------------------------------

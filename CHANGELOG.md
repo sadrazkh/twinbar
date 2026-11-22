@@ -6,6 +6,31 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-22
+
+The first release. Twinbar gives an Electron app (Slack, Discord, Postman,
+Bruno, Cursor, Claude, ...) a second, separately signed-in copy on Windows,
+with its own Start menu entry, taskbar button and icon, without changing the
+app. In short, from the earlier versions:
+
+- Profiles with their own data folder, so their own sign-in, for normal,
+  Squirrel and Microsoft Store installs; `new`, `list`, `open`, `remove`.
+- Their own taskbar button and icon (recoloured and/or badged), through a small
+  launcher that puts the profile's ID on the app's windows.
+- `change`, `rebuild`, `doctor`, and light/dark per profile.
+- The Twinbar window, `install` and `uninstall`, and `apps`.
+
+### Added
+
+- Release files on GitHub: `twinbar-<version>.zip`, a Scoop manifest
+  (`scoop install https://github.com/sadrazkh/twinbar/releases/download/v0.5.0/twinbar.json`),
+  `SHA256SUMS`, and signed build provenance (`gh attestation verify`).
+- GitHub Actions: CI runs the tests and PSScriptAnalyzer on every push and pull
+  request; the Release workflow tests, builds and publishes a version, and
+  makes its tag, as soon as `main` has a version without one.
+- `tools/make-release.ps1` builds the release files (the tests check it too).
+- CONTRIBUTING.md and SECURITY.md.
+
 ## [0.4.0] - 2026-11-22
 
 Phase 4: the Twinbar window, and installing Twinbar.

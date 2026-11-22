@@ -1,0 +1,89 @@
+# Releases a new version by itself: when twinbar.ps1 on main has a version that
+# has no tag yet, this tests it, builds the release files, records signed build
+# provenance, and creates the tag v<version> and the GitHub release.
+# To release: raise $script:TwinbarVersion, add its CHANGELOG.md section, push.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Look for a new version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      new: ${{ steps.version.outputs.new }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Version in twinbar.ps1, and whether it has a tag
+        id: version
+        run: |
+          version=$(sed -n "s/^\$script:TwinbarVersion = '\([0-9]*\.[0-9]*\.[0-9]*\)'.*/\1/p" twinbar.ps1)
+          if [ -z "$version" ]; then echo "::error::no \$script:TwinbarVersion in twinbar.ps1"; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "v$version is already released; nothing to do."
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+            echo "v$version has no tag yet: releasing it."
+          fi
+
+  release:
+    name: Test, build and publish v${{ needs.check.outputs.version }}
+    needs: check
+    if: needs.check.outputs.new == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write     # create the tag and the release
+      id-token: write     # sign the build provenance
+      attestations: write # store it
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+
+      - name: Tests
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\smoke.ps1
+
+      - name: Build the release files
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\make-release.ps1 -OutDir dist -NotesPath release-notes.md
+
+      - name: Record signed build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/twinbar-*.zip
+            dist/twinbar.json
+
+      - name: Tag and publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          $files = (Get-ChildItem -LiteralPath dist -File).FullName
+          gh release create "v$env:VERSION" @files --target $env:GITHUB_SHA --title "Twinbar $env:VERSION" --notes-file release-notes.md

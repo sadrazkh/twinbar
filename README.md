@@ -1,5 +1,9 @@
 # Twinbar
 
+[![CI](https://github.com/sadrazkh/twinbar/actions/workflows/ci.yml/badge.svg)](https://github.com/sadrazkh/twinbar/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/sadrazkh/twinbar)](https://github.com/sadrazkh/twinbar/releases/latest)
+[![MIT licence](https://img.shields.io/github/license/sadrazkh/twinbar)](LICENSE)
+
 A second, separately signed-in copy of your Electron apps on Windows: work and
 personal Slack, two Claude or Postman accounts, a test login next to your real one.
 
@@ -10,10 +14,9 @@ the same time. Microsoft Store apps such as Claude work too.
 
 ![The same app's icon in Twinbar's four styles: original, colour and badge, colour only, badge only](docs/styles.png)
 
-> **Status: early (0.4.0).** Phases 1 to 4 of 5 are done: the command line, an
-> own icon and taskbar button, changing and repairing profiles, light/dark,
-> Store apps, and the Twinbar window. Releases and CI come next. See
-> [docs/phases.md](docs/phases.md).
+> **Status: first release (0.5.0).** All five phases are done; see
+> [docs/phases.md](docs/phases.md). It's young: tested on Windows 11 with a
+> handful of apps, so please report what doesn't work.
 
 ## Requirements
 
@@ -25,17 +28,30 @@ the same time. Microsoft Store apps such as Claude work too.
 
 ## Get it
 
+Download `twinbar-<version>.zip` from the
+[latest release](https://github.com/sadrazkh/twinbar/releases/latest), unpack
+it anywhere, and in that folder run:
+
 ```powershell
-git clone https://github.com/sadrazkh/twinbar.git
-cd twinbar
 .\twinbar.cmd install -AddToPath
 ```
 
-Or download the repository as a zip, unpack it anywhere and run
-`.\twinbar.cmd install` there. This puts **Twinbar** in the Start menu (in
-`%LOCALAPPDATA%\Programs\Twinbar`, for you only); `-AddToPath` also lets you
-type `twinbar` in any new terminal. `twinbar uninstall` takes it away again;
-your profiles stay and keep working.
+This puts **Twinbar** in the Start menu (in `%LOCALAPPDATA%\Programs\Twinbar`,
+for you only); `-AddToPath` also lets you type `twinbar` in any new terminal.
+`twinbar uninstall` takes it away again; your profiles stay and keep working.
+
+With [Scoop](https://scoop.sh), from the release's manifest (then
+`twinbar install` for the Start menu entry):
+
+```powershell
+scoop install https://github.com/sadrazkh/twinbar/releases/latest/download/twinbar.json
+```
+
+Or from the source: `git clone https://github.com/sadrazkh/twinbar.git`, then
+the same `.\twinbar.cmd install` in that folder.
+
+Each release lists the files' SHA-256 in `SHA256SUMS` and has signed build
+provenance: `gh attestation verify twinbar-<version>.zip -R sadrazkh/twinbar`.
 
 You can also use it without installing: `.\twinbar.cmd` runs `twinbar.ps1`
 whatever your PowerShell execution policy is, and `.\twinbar.cmd gui` opens the
@@ -191,6 +207,10 @@ Recycle Bin. The fake app briefly shows a window, to check that it gets a
 taskbar button and icon of its own. With `-RealApp ... -Launch`, the real app
 (`-RealApp Claude` for the Store app) is opened once, signed out, with an empty
 data folder, and closed again; a copy of it you already have open isn't touched.
+
+CI runs these, with PSScriptAnalyzer, on every push and pull request. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how the code is laid out and how a
+release is made, and [SECURITY.md](SECURITY.md) to report a security problem.
 
 ## Credits and licence
 

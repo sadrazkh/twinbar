@@ -9,7 +9,7 @@ Twinbar is built in five phases. Each phase ends with working, tested code on
 | 2 | Own icon and own taskbar button | Done (0.2.0) |
 | 3 | Change and repair profiles; light/dark; Microsoft Store apps | Done (0.3.0) |
 | 4 | The Twinbar app: windows and forms, no terminal needed | Done (0.4.0) |
-| 5 | CI, signed releases, winget/Scoop, docs | Next |
+| 5 | CI, signed releases, Scoop, docs | Done (0.5.0, the first release) |
 
 ## Phase 1: core command line
 
@@ -138,11 +138,25 @@ closing.
 
 ## Phase 5: CI, releases and docs
 
-- GitHub Actions: PSScriptAnalyzer, tests on `windows-latest` against Electron
-  from npm, actions pinned to commit hashes.
-- Release workflow: zip, `SHA256SUMS` and build provenance; winget and Scoop
-  manifests.
-- CONTRIBUTING, SECURITY, screenshots, and optionally a small website.
+- CI (`.github/workflows/ci.yml`): the tests with PSScriptAnalyzer 1.25.0
+  (`PSScriptAnalyzerSettings.psd1`) on `windows-latest`, for every push and
+  pull request. A failed check also becomes an error annotation on the run.
+- Release (`.github/workflows/release.yml`): on every push to `main`, a quick
+  job reads `$script:TwinbarVersion`; if `v<version>` has no tag yet, a Windows
+  job runs the tests, builds the files with `tools/make-release.ps1` (zip, Scoop
+  manifest, `SHA256SUMS`, notes from the CHANGELOG section), records signed
+  build provenance for the zip and manifest, and creates the tag and the
+  release. Releasing is: raise the version, add its CHANGELOG section, push.
+- Actions pinned to commit hashes (checkout v7.0.1, attest-build-provenance
+  v4.2.2), the least permissions per job, `persist-credentials: false`;
+  Dependabot keeps them current, waiting 14 days for new releases.
+- CONTRIBUTING.md, SECURITY.md, and the README's download section and badges.
+
+Left out, on purpose: winget. Its manifests live in Microsoft's
+`winget-pkgs` repository, so publishing there means a pull request there from
+the owner's account; the zip and its hash are what it would need.
+The tests against Electron from npm were left out too: the tests use a fake
+Electron app, plus the real installed apps when run by hand.
 
 ## Not planned
 

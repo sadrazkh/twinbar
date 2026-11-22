@@ -48,7 +48,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.4.0'
+$script:TwinbarVersion = '0.5.0'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:MarkerName = '.twinbar-profile' # in each data folder Twinbar created or adopted
