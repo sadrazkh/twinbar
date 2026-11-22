@@ -6,6 +6,26 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-22
+
+Better proxy advice, after Claude went wrong behind a SOCKS proxy.
+
+### Fixed
+
+- With a SOCKS proxy, the launcher no longer puts the SOCKS address in
+  `HTTPS_PROXY` and `HTTP_PROXY` (most Node.js code can't use it there and
+  fails); it goes in `ALL_PROXY` only. HTTP proxies still set all three.
+
+### Changed
+
+- Setting a SOCKS proxy (`new`, `change`, `doctor`, and the window's hint) now
+  says that some apps' code outside Chromium can't use SOCKS and goes around
+  it, and to use the proxy's HTTP address if it has one. Measured with Claude
+  signed in: Claude Code's sessions skip a SOCKS proxy ("not supported by
+  downstream HTTP agents") and try to connect directly, so sessions and folders
+  don't load where that fails; through an HTTP proxy they work. xray's and
+  v2ray's local ports usually speak HTTP as well as SOCKS.
+
 ## [0.6.0] - 2026-11-22
 
 A proxy for each profile, with a kill switch, and an IP check.

@@ -774,6 +774,7 @@ try {
     Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Routed', '-Proxy', 'socks4://127.0.0.1:1080')) 1 'proxy must look like' 'new with a socks4 proxy fails'
     $r = Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Routed', '-Proxy', $socksUrl)
     Assert-Cli $r 0 ([regex]::Escape("via $socksUrl")) 'new with a SOCKS5 proxy'
+    Assert-Cli $r 0 "can't use a SOCKS proxy.*use http://" 'with the tip to prefer an HTTP proxy'
     $routed = Read-Record 'fakeapp.routed'
     Assert-Equal $socksUrl $routed.proxy 'the record has the proxy'
     $routedData = $routed.dataDir
@@ -786,7 +787,8 @@ try {
       $commandLine = @($lines | Where-Object { $_ -like 'commandline=*' })[0]
       Assert-True ($commandLine.Contains("--proxy-server=$socksUrl")) 'the app was given the proxy' $commandLine
       Assert-True ($commandLine.Contains('"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost"')) 'and told not to look names up itself'
-      Assert-Equal "https_proxy=$socksUrl" (@($lines | Where-Object { $_ -like 'https_proxy=*' })[0]) "and HTTPS_PROXY for code outside Chromium"
+      Assert-Equal "all_proxy=$socksUrl" (@($lines | Where-Object { $_ -like 'all_proxy=*' })[0]) 'and ALL_PROXY for code outside Chromium'
+      Assert-Equal 'https_proxy=' (@($lines | Where-Object { $_ -like 'https_proxy=*' })[0]) "but no HTTPS_PROXY: most code can't use a SOCKS address there"
     }
     $launcherLog = Join-Path $twHome 'logs\launcher.log'
     Assert-True (Wait-Until { [IO.File]::ReadAllText($launcherLog) -match 'fakeapp\.routed: looking after process' } 15) 'the launcher found the app, proxy switches and all'
@@ -806,11 +808,28 @@ try {
     }
     Assert-True ($socksProxy.Requests() -contains "127.0.0.1:$($ipService.Port)") 'ip: the check went through the SOCKS5 proxy, like the profile' (($socksProxy.Requests()) -join ', ')
     Assert-Cli (Invoke-Cli @('ip', 'Routed')) 0 "through $([regex]::Escape($socksUrl)):\s+IP 203\.0\.113\.7\s+Testville, ZZ" 'ip: as text'
-    Assert-Cli (Invoke-Cli @('doctor', 'Routed')) 0 'proxy: .* answers' 'doctor: the proxy answers'
+    $r = Invoke-Cli @('doctor', 'Routed')
+    Assert-Cli $r 0 'proxy: .* answers' 'doctor: the proxy answers'
+    Assert-Cli $r 0 "note  some apps' code outside Chromium" 'doctor: with the SOCKS note'
 
-    Assert-Cli (Invoke-Cli @('change', 'Routed', '-Proxy', "http://127.0.0.1:$($httpProxy.Port)")) 0 'via http://' 'change to an HTTP proxy'
+    $httpUrl = "http://127.0.0.1:$($httpProxy.Port)"
+    $r = Invoke-Cli @('change', 'Routed', '-Proxy', $httpUrl)
+    Assert-Cli $r 0 'via http://' 'change to an HTTP proxy'
+    Assert-True ($r.Out -notmatch 'Tip:') 'no SOCKS tip for an HTTP proxy'
     Assert-Cli (Invoke-Cli @('ip', 'Routed')) 0 'IP 203\.0\.113\.7' 'ip through the HTTP proxy'
     Assert-True ($httpProxy.Requests() -contains "127.0.0.1:$($ipService.Port)") 'ip: the check went through the HTTP proxy' (($httpProxy.Requests()) -join ', ')
+    Remove-Item -LiteralPath $launchedFile -ErrorAction SilentlyContinue
+    [IO.File]::WriteAllText((Join-Path $routedData 'stay.txt'), 'keep running')
+    Assert-Cli (Invoke-Cli @('open', 'Routed')) 0 'Opening' 'open it with the HTTP proxy'
+    if (Wait-Until { Test-Path -LiteralPath $launchedFile } 20) {
+      $lines = [IO.File]::ReadAllLines($launchedFile)
+      Assert-Equal "https_proxy=$httpUrl" (@($lines | Where-Object { $_ -like 'https_proxy=*' })[0]) 'with an HTTP proxy, HTTPS_PROXY too'
+    } else {
+      Assert-True $false 'it started with the HTTP proxy'
+    }
+    [void](Wait-Until { [IO.File]::ReadAllText($launcherLog) -match '(?s)fakeapp\.routed: looking after process.*fakeapp\.routed: looking after process' } 15)
+    Remove-Item -LiteralPath (Join-Path $routedData 'stay.txt')
+    Assert-True (Wait-Until { @(Get-ProcessesFor $routedData).Count -eq 0 -and @(Get-LaunchersFor 'fakeapp.routed').Count -eq 0 } 30) 'it quit again'
 
     Assert-Cli (Invoke-Cli @('change', 'Routed', '-Proxy', "socks5://127.0.0.1:$closedPort")) 0 'Changed' 'change to a proxy that is down'
     $r = Invoke-Cli @('ip', 'Routed')

@@ -50,7 +50,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.6.0'
+$script:TwinbarVersion = '0.6.1'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
@@ -977,8 +977,12 @@ namespace TwinbarLauncher {
       info.WorkingDirectory = Path.GetDirectoryName(launchExe);
       if (proxy.Length > 0) {
         // For the app's own code outside Chromium (Node.js), where it honours these.
-        info.EnvironmentVariables["HTTPS_PROXY"] = proxy;
-        info.EnvironmentVariables["HTTP_PROXY"] = proxy;
+        // HTTPS_PROXY and HTTP_PROXY only for an HTTP proxy: most Node code can't use a
+        // SOCKS address there and would fail; ALL_PROXY takes either.
+        if (proxy.StartsWith("http")) {
+          info.EnvironmentVariables["HTTPS_PROXY"] = proxy;
+          info.EnvironmentVariables["HTTP_PROXY"] = proxy;
+        }
         info.EnvironmentVariables["ALL_PROXY"] = proxy;
         info.EnvironmentVariables["NO_PROXY"] = "localhost,127.0.0.1,::1";
       }
@@ -1633,6 +1637,15 @@ function Get-ProxyArgs([string] $ProxyValue, [switch] $NoDnsRule) {
   return ($parts -join ' ')
 }
 
+# Measured with Claude signed in: its code outside Chromium (Claude Code's sessions)
+# takes Chromium's proxy, but skips a SOCKS one ("not supported by downstream HTTP
+# agents") and goes around it. An HTTP proxy it uses.
+$script:SocksTip = "Tip: some apps' code outside Chromium (Claude's, for one) can't use a SOCKS proxy and goes around it. If your proxy also speaks HTTP (xray's and v2ray's ports usually do), use http://host:port instead."
+
+function Get-ProxyNotes([string] $ProxyValue) {
+  if ($ProxyValue -like 'socks5://*') { return $script:SocksTip }
+}
+
 function Get-ExtraArgs([string] $AppearanceValue, [string] $ProxyValue, [string] $AppKind) {
   $proxyArgs = Get-ProxyArgs $ProxyValue -NoDnsRule:($AppKind -eq 'store')
   return (@($script:Appearances[$AppearanceValue], $proxyArgs) | Where-Object { $_ }) -join ' '
@@ -2158,6 +2171,7 @@ function Invoke-New {
   "  Icon:         $(Get-LookNote $record)"
   "  Sign-in data: $dd ($dataNote)"
   "Open it from the Start menu, or run: twinbar open ""$fullName"""
+  Get-ProxyNotes $record.proxy
 }
 
 # After a data folder went: its now-empty <app> folder, and the Store data root
@@ -2198,6 +2212,7 @@ function Invoke-Change {
   if ($ProxyValue) { $record.proxy = Resolve-ProxyValue $ProxyValue }
   $pins = Publish-Profile $record
   "Changed ""$($record.appName) $($record.name)"": $(Get-LookNote $record)."
+  if ($ProxyValue) { Get-ProxyNotes $record.proxy }
   if ($pins) { "  Updated $pins taskbar pin(s)." }
 }
 
@@ -2382,6 +2397,7 @@ function Invoke-Doctor([string] $Which) {
       $proxyUri = [Uri]$r.proxy
       if (Test-TcpPort $proxyUri.Host.Trim('[', ']') $proxyUri.Port 2000) { & $ok "proxy: $($r.proxy) answers" }
       else { & $warn "proxy: $($r.proxy) doesn't answer, so the profile stays offline until it does (that's the kill switch)" }
+      if ($r.proxy -like 'socks5://*') { & $note ($script:SocksTip -replace '^Tip: ', '') }
     }
     if (@(Get-ProfileProcesses $p).Count) {
       if (@(Get-ProfileLaunchers $r.id).Count) { & $ok 'running, looked after by the launcher' }
@@ -2993,7 +3009,8 @@ function New-ProfileDialog($Row) {
   $preview.Margin = New-Object Windows.Forms.Padding((Get-Scaled 16), 0, 0, 0)
   $hint = New-Object Windows.Forms.Label
   $hint.Text = "Leave the badge empty for the name's first letter. Light and dark work for apps that follow Windows. " +
-    'Proxy: like socks5://127.0.0.1:10808 or http://host:8080, or empty for none; if it is down, the profile stays offline.'
+    'Proxy: like http://127.0.0.1:10809 or socks5://127.0.0.1:10808, or empty for none; if it is down, the profile stays offline. ' +
+    "Prefer the HTTP address: some apps (Claude) don't use a SOCKS proxy outside Chromium."
   $hint.AutoSize = $true
   $hint.MaximumSize = New-Object Drawing.Size(($wide + (Get-Scaled 90)), 0)
   $hint.ForeColor = [Drawing.SystemColors]::GrayText

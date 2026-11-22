@@ -146,21 +146,30 @@ Options for `new` (and, except the last three, `change`):
 
 ## Proxy and kill switch
 
-Give a profile a proxy, for example the local SOCKS port of your VPN or xray
-client, and check where its traffic comes out:
+Give a profile a proxy, for example the local port of your VPN or xray client,
+and check where its traffic comes out:
 
 ```powershell
-.\twinbar.cmd new -App Postman -Name Work -Proxy socks5://127.0.0.1:10808
+.\twinbar.cmd new -App Postman -Name Work -Proxy http://127.0.0.1:10809
 .\twinbar.cmd ip "Postman Work"
 ```
+
+**Prefer the proxy's HTTP address.** Chromium uses SOCKS5 and HTTP proxies
+alike, but an app's own code outside Chromium often can't use SOCKS. Claude,
+signed in, is one: Claude Code's sessions skip a SOCKS proxy and try to
+connect directly, so its sessions and folders don't load if that fails (it
+keeps asking you to choose a folder); with an HTTP proxy they go through it.
+xray's and v2ray's local ports usually speak HTTP as well as SOCKS, so the same
+port often works as `http://127.0.0.1:<port>`.
 
 The proxy is strict, so it works as a kill switch for the app's web traffic:
 Chromium never falls back to a direct connection, host names are looked up
 through the proxy (only the proxy's own name and localhost are looked up on
 your computer), and WebRTC can't send UDP around it. If the proxy is down, the
 profile is offline. For normal and Squirrel installs Twinbar also sets
-`HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` for the app's code outside
-Chromium; Windows doesn't let Store apps be given these. Store apps also go
+`ALL_PROXY` for the app's code outside Chromium, and `HTTPS_PROXY` and
+`HTTP_PROXY` too for an HTTP proxy; Windows doesn't let Store apps be given
+these (Claude's own code reads the proxy from Chromium instead). Store apps also go
 without the "look nothing up locally" rule, because Claude doesn't start with
 it; their connections still go only through the proxy, but some names may be
 looked up through your normal DNS server.
@@ -174,7 +183,8 @@ app for 30 seconds:
 |---|---|---|---|
 | Postman 12.33 | all 7 destinations | nothing | nothing gets out |
 | Bruno 4.3 | its web traffic | one connection from its main process, to an Amazon (AWS) server | that one connection still gets out |
-| Claude 6.28 (Store) | all 9 destinations (claude.ai, Anthropic, hCaptcha) | nothing | nothing gets out |
+| Claude 6.28 (Store), signed out | all 9 destinations (claude.ai, Anthropic, hCaptcha) | nothing | nothing gets out |
+| Claude 6.28 (Store), signed in, SOCKS proxy | its web traffic | Claude Code's sessions skip a SOCKS proxy (its log: "Skipping SOCKS proxy entry") | those connections go around it; use an HTTP proxy |
 
 Stopping that last kind of traffic needs a firewall rule, which needs admin
 rights and applies to the app's program file, so it would cut off the
