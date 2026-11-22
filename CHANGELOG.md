@@ -6,6 +6,34 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-22
+
+Phase 4: the Twinbar window, and installing Twinbar.
+
+### Added
+
+- The Twinbar window (`twinbar gui`, or Twinbar in the Start menu once
+  installed): the profiles with their icons and whether they're running;
+  New and Edit with a live icon preview (app, name, colour with swatches or
+  any custom colour, badge, icon style, appearance); Open; Remove, asking
+  whether to delete the sign-in too; Repair, which asks where the app went if
+  it moved; and Check all, which shows what `doctor` finds.
+- `twinbar install [-Dir DIR] [-AddToPath]`: installs Twinbar for you, without
+  admin rights, in `%LOCALAPPDATA%\Programs\Twinbar`, with Twinbar in the Start
+  menu. `Twinbar.exe` is compiled there from source inside `twinbar.ps1`; it
+  shows the window without a console, has its own icon and taskbar button, and
+  opens only once. `-AddToPath` lets you type `twinbar` in any terminal.
+- `twinbar uninstall`: removes the installed Twinbar (and its PATH entry);
+  profiles stay and keep working.
+- `twinbar apps [-Json]`: the Electron apps found in the Start menu and among
+  the Microsoft Store apps, with what to give `-App`.
+- Twinbar's own icon: two overlapping windows.
+
+### Changed
+
+- `remove -DeleteData` also removes the empty folders it leaves behind in
+  Twinbar's data folders.
+
 ## [0.3.0] - 2026-11-22
 
 Phase 3: change and repair profiles, light/dark, Microsoft Store apps.

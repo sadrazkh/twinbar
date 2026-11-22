@@ -11,6 +11,10 @@ Twinbar: a second, separately signed-in copy of an Electron app on Windows.
   twinbar list [-Json]
   twinbar open PROFILE
   twinbar remove PROFILE [-DeleteData]
+  twinbar apps [-Json]
+  twinbar gui
+  twinbar install [-Dir DIR] [-AddToPath] [-ShortcutDir DIR]
+  twinbar uninstall
   twinbar help
   twinbar version
 
@@ -36,13 +40,17 @@ param(
   [string] $ShortcutDir,
   [switch] $DeleteData,
   [switch] $All,
+  [string] $Dir,
+  [switch] $AddToPath,
   [switch] $Json
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.3.0'
+$script:TwinbarVersion = '0.4.0'
+$script:SelfPath = $MyInvocation.MyCommand.Path
+$script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:MarkerName = '.twinbar-profile' # in each data folder Twinbar created or adopted
 $script:AppIdPrefix = 'Twinbar'          # AppUserModelID: Twinbar.<app id>.<name key>
 $script:LauncherName = 'twinbar-launcher.exe'
@@ -253,6 +261,15 @@ namespace TwinbarInterop {
     // Asks Explorer to redraw icons (Start menu, taskbar pins) after they changed.
     public static void NotifyIconsChanged() {
       SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero); // SHCNE_ASSOCCHANGED
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
+
+    // Tells running programs (Explorer, new terminals) that the user's PATH changed.
+    public static void NotifyEnvironmentChanged() {
+      IntPtr result;
+      SendMessageTimeoutW(new IntPtr(0xFFFF), 0x1A, IntPtr.Zero, "Environment", 2, 1000, out result); // HWND_BROADCAST, WM_SETTINGCHANGE
     }
 
     [DllImport("user32.dll")]
@@ -512,33 +529,22 @@ namespace TwinbarInterop {
       }
     }
 
-    // style: tint+badge, tint, badge or original. Writes a preview PNG (256 x 256) too if asked.
-    public static void Build(string source, string output, string style, string colorHex, string badgeText, string preview) {
-      Color color = ColorTranslator.FromHtml(colorHex);
-      bool tint = style == "tint" || style == "tint+badge";
-      bool badge = style == "badge" || style == "tint+badge";
-      string file = source;
-      int index = 0;
+    // The file and index to take the app's icon from; Windows' own "application"
+    // icon when the app has none.
+    static void ResolveSource(string source, out string file, out int index) {
+      file = source;
+      index = 0;
       using (Bitmap probe = Extract(source, 0, 32)) {
-        if (probe == null) {
-          // No icon in the app: start from Windows' own "application" icon.
-          StockIconInfo stock = new StockIconInfo();
-          stock.Size = Marshal.SizeOf(typeof(StockIconInfo));
-          if (SHGetStockIconInfo(2, 0, ref stock) != 0) throw new InvalidOperationException("couldn't find an icon to start from");
-          file = stock.Path;
-          index = stock.IconIndex;
-        }
+        if (probe != null) return;
       }
-      List<byte[]> images = new List<byte[]>();
-      foreach (int size in Sizes) {
-        using (Bitmap src = Extract(file, index, size)) {
-          if (src == null) throw new InvalidOperationException("couldn't read the app's icon at " + size + " x " + size);
-          using (Bitmap img = Render(src, size, tint, badge, color, badgeText)) {
-            images.Add(size >= 256 ? Png(img) : Dib(img));
-            if (size >= 256 && !String.IsNullOrEmpty(preview)) img.Save(preview, ImageFormat.Png);
-          }
-        }
-      }
+      StockIconInfo stock = new StockIconInfo();
+      stock.Size = Marshal.SizeOf(typeof(StockIconInfo));
+      if (SHGetStockIconInfo(2, 0, ref stock) != 0) throw new InvalidOperationException("couldn't find an icon to start from");
+      file = stock.Path;
+      index = stock.IconIndex;
+    }
+
+    static void WriteIco(string output, List<byte[]> images) {
       using (FileStream fs = File.Create(output))
       using (BinaryWriter bw = new BinaryWriter(fs)) {
         bw.Write((short)0); bw.Write((short)1); bw.Write((short)images.Count);
@@ -551,6 +557,77 @@ namespace TwinbarInterop {
         }
         foreach (byte[] image in images) bw.Write(image);
       }
+    }
+
+    // style: tint+badge, tint, badge or original. Writes a preview PNG (256 x 256) too if asked.
+    public static void Build(string source, string output, string style, string colorHex, string badgeText, string preview) {
+      Color color = ColorTranslator.FromHtml(colorHex);
+      bool tint = style == "tint" || style == "tint+badge";
+      bool badge = style == "badge" || style == "tint+badge";
+      string file;
+      int index;
+      ResolveSource(source, out file, out index);
+      List<byte[]> images = new List<byte[]>();
+      foreach (int size in Sizes) {
+        using (Bitmap src = Extract(file, index, size)) {
+          if (src == null) throw new InvalidOperationException("couldn't read the app's icon at " + size + " x " + size);
+          using (Bitmap img = Render(src, size, tint, badge, color, badgeText)) {
+            images.Add(size >= 256 ? Png(img) : Dib(img));
+            if (size >= 256 && !String.IsNullOrEmpty(preview)) img.Save(preview, ImageFormat.Png);
+          }
+        }
+      }
+      WriteIco(output, images);
+    }
+
+    // One size of what Build would draw, for showing in a window.
+    public static Bitmap Preview(string source, string style, string colorHex, string badgeText, int size) {
+      string file;
+      int index;
+      ResolveSource(source, out file, out index);
+      using (Bitmap src = Extract(file, index, size)) {
+        if (src == null) throw new InvalidOperationException("couldn't read the app's icon");
+        bool tint = style == "tint" || style == "tint+badge";
+        bool badge = style == "badge" || style == "tint+badge";
+        return Render(src, size, tint, badge, ColorTranslator.FromHtml(colorHex), badgeText);
+      }
+    }
+
+    static GraphicsPath RoundedRectangle(RectangleF r, float radius) {
+      GraphicsPath path = new GraphicsPath();
+      float d = radius * 2;
+      path.AddArc(r.X, r.Y, d, d, 180, 90);
+      path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+      path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+      path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+      path.CloseFigure();
+      return path;
+    }
+
+    // Twinbar's own icon: two overlapping windows, the front one cut out of the back one.
+    public static void BuildAppIcon(string output) {
+      List<byte[]> images = new List<byte[]>();
+      foreach (int size in Sizes) {
+        using (Bitmap img = new Bitmap(size, size, PixelFormat.Format32bppArgb))
+        using (Graphics g = Graphics.FromImage(img)) {
+          g.SmoothingMode = SmoothingMode.AntiAlias;
+          g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+          float s = size, radius = s * 0.14f, gap = Math.Max(1f, s * 0.05f);
+          RectangleF back = new RectangleF(s * 0.04f, s * 0.04f, s * 0.62f, s * 0.62f);
+          RectangleF front = new RectangleF(s * 0.34f, s * 0.34f, s * 0.62f, s * 0.62f);
+          using (GraphicsPath p = RoundedRectangle(back, radius))
+          using (SolidBrush b = new SolidBrush(Color.FromArgb(0x8E, 0xA4, 0xF2))) g.FillPath(b, p);
+          RectangleF cut = RectangleF.Inflate(front, gap, gap);
+          g.CompositingMode = CompositingMode.SourceCopy;
+          using (GraphicsPath p = RoundedRectangle(cut, radius + gap))
+          using (SolidBrush b = new SolidBrush(Color.Transparent)) g.FillPath(b, p);
+          g.CompositingMode = CompositingMode.SourceOver;
+          using (GraphicsPath p = RoundedRectangle(front, radius))
+          using (SolidBrush b = new SolidBrush(Color.FromArgb(0x3E, 0x63, 0xDD))) g.FillPath(b, p);
+          images.Add(size >= 256 ? Png(img) : Dib(img));
+        }
+      }
+      WriteIco(output, images);
     }
   }
 }
@@ -1042,6 +1119,283 @@ function Get-ProfileLaunchers([string] $Id) {
 }
 
 # ---------------------------------------------------------------------------
+# Twinbar.exe: the Twinbar window without a console. It runs twinbar.ps1 (next
+# to it) inside PowerShell with "gui", and has its own icon and taskbar ID.
+# Built by "twinbar install" on this computer, like the launcher.
+# ---------------------------------------------------------------------------
+
+$script:AppHostSource = @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Management.Automation;
+using System.Management.Automation.Runspaces;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+[assembly: AssemblyTitle("Twinbar")]
+[assembly: AssemblyProduct("Twinbar")]
+[assembly: AssemblyVersion("{{VERSION}}.0")]
+[assembly: AssemblyFileVersion("{{VERSION}}.0")]
+
+namespace TwinbarApp {
+  public static class Program {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int MessageBoxW(IntPtr hwnd, string text, string caption, uint type);
+
+    [STAThread]
+    public static int Main(string[] args) {
+      SetCurrentProcessExplicitAppUserModelID("Twinbar.App");
+      SetProcessDPIAware();
+      try {
+        bool first;
+        using (Mutex single = new Mutex(true, "Local\\Twinbar.App", out first)) {
+          if (!first) {
+            // Already open: bring that window forward instead.
+            Process me = Process.GetCurrentProcess();
+            foreach (Process p in Process.GetProcessesByName(me.ProcessName)) {
+              if (p.Id != me.Id && p.MainWindowHandle != IntPtr.Zero) {
+                ShowWindow(p.MainWindowHandle, 9); // SW_RESTORE
+                SetForegroundWindow(p.MainWindowHandle);
+              }
+            }
+            return 0;
+          }
+          string script = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "twinbar.ps1");
+          if (!File.Exists(script)) throw new FileNotFoundException("twinbar.ps1 should be next to Twinbar.exe, in " + AppDomain.CurrentDomain.BaseDirectory);
+          InitialSessionState state = InitialSessionState.CreateDefault();
+          state.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;
+          using (Runspace runspace = RunspaceFactory.CreateRunspace(state)) {
+            runspace.ApartmentState = ApartmentState.STA;
+            runspace.ThreadOptions = PSThreadOptions.UseCurrentThread;
+            runspace.Open();
+            using (PowerShell shell = PowerShell.Create()) {
+              shell.Runspace = runspace;
+              shell.AddCommand(script).AddArgument("gui");
+              shell.Invoke();
+              if (shell.Streams.Error.Count > 0) throw new InvalidOperationException(shell.Streams.Error[0].ToString());
+            }
+          }
+          single.ReleaseMutex();
+        }
+        return 0;
+      } catch (Exception e) {
+        MessageBoxW(IntPtr.Zero, "Twinbar couldn't start.\n\n" + e.Message, "Twinbar", 0x10);
+        return 1;
+      }
+    }
+  }
+}
+'@
+
+# Twinbar's own icon, drawn once per version.
+function Get-AppIconPath {
+  $path = Join-Path (Get-IconsDir) "twinbar-$($script:TwinbarVersion).ico"
+  if (-not (Test-Path -LiteralPath $path)) {
+    Initialize-Interop
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+    [TwinbarInterop.IconMaker]::BuildAppIcon("$path.$PID.tmp")
+    Move-Item -LiteralPath "$path.$PID.tmp" -Destination $path -Force
+  }
+  return $path
+}
+
+function New-AppHost([string] $Path, [string] $IconPath) {
+  $tmp = "$Path.$PID.tmp.exe"
+  $parameters = New-Object System.CodeDom.Compiler.CompilerParameters
+  $parameters.GenerateExecutable = $true
+  $parameters.OutputAssembly = $tmp
+  $parameters.CompilerOptions = "/target:winexe /win32icon:`"$IconPath`""
+  foreach ($reference in @('System.dll', 'System.Core.dll', [psobject].Assembly.Location)) { [void]$parameters.ReferencedAssemblies.Add($reference) }
+  Add-Type -TypeDefinition ($script:AppHostSource.Replace('{{VERSION}}', $script:TwinbarVersion)) -Language CSharp -CompilerParameters $parameters
+  try {
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+  } catch {
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    Stop-Twinbar "couldn't replace $Path; close the Twinbar window and try again"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Finding Electron apps to make profiles of (for "twinbar apps" and the window)
+# ---------------------------------------------------------------------------
+
+function Get-StartMenuDirs {
+  if ($env:TWINBAR_START_MENU) { return @($env:TWINBAR_START_MENU -split ';' | Where-Object { $_ }) }
+  return @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms'))
+}
+
+# Electron apps in the Start menu (normal and Squirrel installs) and in the
+# Microsoft Store packages, one entry each, by name.
+function Find-ElectronApps([switch] $NoStore) {
+  $found = @{}
+  foreach ($dir in Get-StartMenuDirs) {
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    foreach ($lnk in @(Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -File -Recurse -ErrorAction SilentlyContinue)) {
+      try { $link = Read-ShellLink $lnk.FullName } catch { continue }
+      if ($link.AppUserModelId -like "$($script:AppIdPrefix).*" -or $link.TargetPath -notmatch '\.exe$') { continue }
+      $target = [Environment]::ExpandEnvironmentVariables($link.TargetPath)
+      $targetDir = Split-Path -Parent $target
+      # A cheap look first, so most shortcuts are passed over quickly.
+      if (-not ((Test-ElectronDir $targetDir) -or (Test-Path -LiteralPath (Join-Path $targetDir 'Update.exe')))) { continue }
+      try { $app = Resolve-ElectronApp $lnk.FullName } catch { continue }
+      $key = $app.LaunchExe.ToLowerInvariant()
+      if (-not $found.ContainsKey($key)) {
+        $found[$key] = [pscustomobject]@{ Name = $app.Name; Kind = $app.Kind; Source = $lnk.FullName; LaunchExe = $app.LaunchExe; Id = $app.Id }
+      }
+    }
+  }
+  if (-not $NoStore) {
+    foreach ($package in @(Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { -not $_.IsFramework -and $_.InstallLocation -and $_.SignatureKind -ne 'System' })) {
+      foreach ($entry in @(Get-StoreAppEntries $package)) {
+        if (-not (Test-ElectronDir (Split-Path -Parent $entry.Exe))) { continue }
+        $key = $entry.Exe.ToLowerInvariant()
+        if ($found.ContainsKey($key)) { continue }
+        $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($entry.Exe)
+        $displayName = @($info.ProductName, $info.FileDescription, [IO.Path]::GetFileNameWithoutExtension($entry.Exe)) |
+          Where-Object { $_ -and $_.Trim() } | Select-Object -First 1
+        $found[$key] = [pscustomobject]@{
+          Name = $displayName; Kind = 'store'; Source = "$($entry.PackageFamily)!$($entry.AppId)"
+          LaunchExe = $entry.Exe; Id = Get-NameKey ([IO.Path]::GetFileNameWithoutExtension($entry.Exe))
+        }
+      }
+    }
+  }
+  $found.Values | Sort-Object Name
+}
+
+function Invoke-Apps([switch] $AsJson) {
+  $apps = @(Find-ElectronApps)
+  if ($AsJson) { return (ConvertTo-Json -InputObject $apps -Depth 3) }
+  if (-not $apps.Count) { return 'No Electron apps found in the Start menu or the Microsoft Store apps.' }
+  $w = [Math]::Max(4, ($apps | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum)
+  ('{0}  {1}  {2}' -f 'App'.PadRight($w), 'Kind'.PadRight(8), 'Give twinbar new -App')
+  foreach ($a in $apps) { ('{0}  {1}  {2}' -f $a.Name.PadRight($w), $a.Kind.PadRight(8), $a.Source) }
+}
+
+# ---------------------------------------------------------------------------
+# install and uninstall
+# ---------------------------------------------------------------------------
+
+$script:CmdWrapper = "@echo off`r`nrem Twinbar: runs twinbar.ps1 with Windows PowerShell, whatever the execution policy.`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0twinbar.ps1`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+$script:InstallMarker = '.twinbar-install'
+$script:InstalledFiles = @('twinbar.ps1', 'twinbar.cmd', 'Twinbar.exe', 'twinbar.ico', 'LICENSE', 'README.md', '.twinbar-install')
+
+function Get-DefaultInstallDir { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Twinbar' }
+function Get-InstallInfoPath { Join-Path (Get-TwinbarHome) 'install.json' }
+
+# PATH is a ;-separated list; entries compare without a trailing backslash.
+function Add-PathEntry([string] $PathValue, [string] $Folder) {
+  $parts = @($PathValue -split ';' | Where-Object { $_ })
+  if (@($parts | Where-Object { $_.TrimEnd('\') -ieq $Folder.TrimEnd('\') }).Count) { return $PathValue }
+  return (@($parts) + $Folder) -join ';'
+}
+
+function Remove-PathEntry([string] $PathValue, [string] $Folder) {
+  return (@($PathValue -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $Folder.TrimEnd('\') }) -join ';')
+}
+
+# The user's own PATH, as stored (with %VARIABLES% unexpanded).
+function Get-UserPath {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+  try { return [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $key.Close() }
+}
+
+function Set-UserPath([string] $Value) {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+  try { $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString) } finally { $key.Close() }
+  Initialize-Interop
+  [TwinbarInterop.Shell]::NotifyEnvironmentChanged()
+}
+
+function Invoke-Install([string] $Folder, [string] $MenuDir, [switch] $OnPath) {
+  $source = Split-Path -Parent $script:SelfPath
+  $target = if ($Folder) { (Resolve-FullPath $Folder).TrimEnd('\') } else { Get-DefaultInstallDir }
+  if (Test-ProtectedDir $target) { Stop-Twinbar "$target can't be Twinbar's folder; pick a folder of its own" }
+  $marker = Join-Path $target $script:InstallMarker
+  if ((Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $marker) -and
+    @(Get-ChildItem -LiteralPath $target -Force | Select-Object -First 1).Count) {
+    Stop-Twinbar "$target already has other files in it; pick an empty folder"
+  }
+  [void][IO.Directory]::CreateDirectory($target)
+  if ($source -ine $target) {
+    foreach ($file in 'twinbar.ps1', 'LICENSE', 'README.md') {
+      $from = Join-Path $source $file
+      if (Test-Path -LiteralPath $from) { Copy-Item -LiteralPath $from -Destination (Join-Path $target $file) -Force }
+    }
+  }
+  [IO.File]::WriteAllText((Join-Path $target 'twinbar.cmd'), $script:CmdWrapper, (New-Object Text.ASCIIEncoding))
+  Copy-Item -LiteralPath (Get-AppIconPath) -Destination (Join-Path $target 'twinbar.ico') -Force
+  New-AppHost (Join-Path $target 'Twinbar.exe') (Join-Path $target 'twinbar.ico')
+  [IO.File]::WriteAllText($marker, $script:TwinbarVersion, $script:Utf8NoBom)
+  [void](Initialize-Launcher)
+
+  $menu = if ($MenuDir) { Resolve-FullPath $MenuDir } else { Get-DefaultShortcutDir }
+  $shortcut = Join-Path $menu 'Twinbar.lnk'
+  if ((Test-Path -LiteralPath $shortcut) -and (Read-ShellLink $shortcut).AppUserModelId -ne $script:AppId) {
+    Stop-Twinbar "there's a shortcut at $shortcut that Twinbar didn't make; move it away first"
+  }
+  [void][IO.Directory]::CreateDirectory($menu)
+  Save-ShellLink -Path $shortcut -TargetPath (Join-Path $target 'Twinbar.exe') -WorkingDirectory $target `
+    -IconPath (Join-Path $target 'twinbar.ico') -Description 'Twinbar: second, separately signed-in copies of your apps' `
+    -AppUserModelId $script:AppId
+
+  $previous = if (Test-Path -LiteralPath (Get-InstallInfoPath)) { [IO.File]::ReadAllText((Get-InstallInfoPath)) | ConvertFrom-Json } else { $null }
+  $addedToPath = $false
+  if ($null -ne $previous -and (Get-RecordValue $previous 'dir') -ieq $target -and (Get-RecordValue $previous 'addedToPath') -eq 'True') { $addedToPath = $true }
+  if ($OnPath) {
+    $current = Get-UserPath
+    $updated = Add-PathEntry $current $target
+    if ($updated -ne $current) { Set-UserPath $updated; $addedToPath = $true }
+  }
+  [void][IO.Directory]::CreateDirectory((Get-TwinbarHome))
+  $info = [ordered]@{ dir = $target; shortcut = $shortcut; addedToPath = $addedToPath; version = $script:TwinbarVersion; installed = (Get-Date).ToString('o') }
+  [IO.File]::WriteAllText((Get-InstallInfoPath), ($info | ConvertTo-Json), $script:Utf8NoBom)
+  [TwinbarInterop.Shell]::NotifyIconsChanged()
+
+  "Installed Twinbar $($script:TwinbarVersion) in $target."
+  "  Start menu:   $shortcut"
+  if ($addedToPath) { '  Command line: on your PATH; in a new terminal, run: twinbar help' }
+  else { "  Command line: $(Join-Path $target 'twinbar.cmd') (install again with -AddToPath to just type twinbar)" }
+}
+
+function Invoke-Uninstall([string] $Folder) {
+  $info = if (Test-Path -LiteralPath (Get-InstallInfoPath)) { [IO.File]::ReadAllText((Get-InstallInfoPath)) | ConvertFrom-Json } else { $null }
+  $target = if ($Folder) { (Resolve-FullPath $Folder).TrimEnd('\') } elseif ($info) { Get-RecordValue $info 'dir' } else { Get-DefaultInstallDir }
+  if (-not (Test-Path -LiteralPath (Join-Path $target $script:InstallMarker))) { Stop-Twinbar "Twinbar isn't installed in $target" }
+  $running = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'Twinbar.exe'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq (Join-Path $target 'Twinbar.exe') })
+  if ($running.Count) { Stop-Twinbar 'the Twinbar window is open; close it first' }
+
+  $shortcut = if ($info) { Get-RecordValue $info 'shortcut' } else { Join-Path (Get-DefaultShortcutDir) 'Twinbar.lnk' }
+  if ($shortcut -and (Test-Path -LiteralPath $shortcut) -and (Read-ShellLink $shortcut).AppUserModelId -eq $script:AppId) {
+    Remove-Item -LiteralPath $shortcut -Force
+  }
+  if ($info -and (Get-RecordValue $info 'addedToPath') -eq 'True') {
+    $current = Get-UserPath
+    $updated = Remove-PathEntry $current $target
+    if ($updated -ne $current) { Set-UserPath $updated }
+  }
+  foreach ($file in $script:InstalledFiles) {
+    $path = Join-Path $target $file
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+  }
+  if (-not @(Get-ChildItem -LiteralPath $target -Force | Select-Object -First 1).Count) { Remove-Item -LiteralPath $target -Force }
+  if (Test-Path -LiteralPath (Get-InstallInfoPath)) { Remove-Item -LiteralPath (Get-InstallInfoPath) -Force }
+
+  $count = @(Get-AllProfiles).Count
+  "Uninstalled Twinbar from $target."
+  if ($count) {
+    "  Your $count profile(s) keep working from the Start menu. To remove them too, run twinbar remove"
+    "  from a copy of Twinbar (the repository, say), or install it again."
+  }
+}
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
@@ -1058,7 +1412,10 @@ function Get-ProfilesDir { Join-Path (Get-TwinbarHome) 'profiles' }
 
 function Get-RecordPath([string] $Id) { Join-Path (Get-ProfilesDir) "$Id.json" }
 
-function Get-DefaultShortcutDir { Join-Path ([Environment]::GetFolderPath('Programs')) 'Twinbar' }
+function Get-DefaultShortcutDir {
+  if ($env:TWINBAR_SHORTCUT_DIR) { return $env:TWINBAR_SHORTCUT_DIR.TrimEnd('\') }
+  return (Join-Path ([Environment]::GetFolderPath('Programs')) 'Twinbar')
+}
 
 function Resolve-FullPath([string] $Path) {
   $p = [Environment]::ExpandEnvironmentVariables($Path.Trim().Trim('"'))
@@ -1646,6 +2003,23 @@ function Invoke-New {
   "Open it from the Start menu, or run: twinbar open ""$fullName"""
 }
 
+# After a data folder went: its now-empty <app> folder, and the Store data root
+# if that's empty too. Only ever inside Twinbar's own data folders.
+function Remove-EmptyDataParents([string] $DataDir) {
+  $roots = @((Join-Path (Get-TwinbarHome) 'data'), (Get-StoreDataRoot))
+  $parent = Split-Path -Parent $DataDir
+  foreach ($root in $roots) {
+    if ($parent -and (Split-Path -Parent $parent) -ieq $root -and (Test-Path -LiteralPath $parent) -and
+      -not @(Get-ChildItem -LiteralPath $parent -Force | Select-Object -First 1).Count) {
+      Remove-Item -LiteralPath $parent -Force
+    }
+  }
+  $storeRoot = Get-StoreDataRoot
+  if ((Test-Path -LiteralPath $storeRoot) -and -not @(Get-ChildItem -LiteralPath $storeRoot -Force | Select-Object -First 1).Count) {
+    Remove-Item -LiteralPath $storeRoot -Force
+  }
+}
+
 function Assert-NotRunning($Record) {
   if (@(Get-ProfileProcesses $Record).Count) {
     Stop-Twinbar "$($Record.appName) $($Record.name) is running; quit it first"
@@ -1859,6 +2233,7 @@ function Invoke-Remove([string] $Which, [switch] $WithData) {
     $state = Get-DataDirState $p.dataDir $p.id
     if ($state -eq 'ours') {
       Move-ToRecycleBin $p.dataDir
+      Remove-EmptyDataParents $p.dataDir
       $report += "  Sign-in data: moved to the Recycle Bin ($($p.dataDir))"
     } elseif ($state -ne 'missing') {
       Write-Warning "kept $($p.dataDir): it doesn't carry this profile's Twinbar marker"
@@ -1875,6 +2250,675 @@ function Invoke-Remove([string] $Which, [switch] $WithData) {
   Remove-Item -LiteralPath (Get-RecordPath $p.id) -Force
   "Removed ""$fullName""."
   $report
+}
+
+# ---------------------------------------------------------------------------
+# The Twinbar window: the same commands without a terminal. WinForms, built in
+# code; every button calls the same Invoke-* function as the command line.
+# Event handlers reach their state through $script:Gui and $script:Dialog
+# (one window and one dialog at a time).
+# ---------------------------------------------------------------------------
+
+$script:Gui = $null
+$script:Dialog = $null
+$script:GuiScale = 1.0
+$script:GuiNoDialogs = $false # tests: collect messages instead of showing them
+$script:GuiMessages = New-Object System.Collections.Generic.List[string]
+$script:StyleNames = [ordered]@{ 'Colour and badge' = 'tint+badge'; 'Colour only' = 'tint'; 'Badge only' = 'badge'; "The app's own icon" = 'original' }
+$script:AppearanceNames = [ordered]@{ 'Same as Windows' = 'system'; 'Light' = 'light'; 'Dark' = 'dark' }
+
+function Initialize-Forms {
+  Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+  Initialize-Interop
+  $g = [Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
+  try { $script:GuiScale = $g.DpiX / 96.0 } finally { $g.Dispose() }
+}
+
+function Get-Scaled([double] $Pixels) { [int][Math]::Round($Pixels * $script:GuiScale) }
+
+function ConvertTo-Sentence([string] $Text) {
+  if (-not $Text) { return $Text }
+  $t = $Text.Trim()
+  $t = $t.Substring(0, 1).ToUpperInvariant() + $t.Substring(1)
+  if ($t -notmatch '[.!?]$') { $t += '.' }
+  return $t
+}
+
+function Show-GuiMessage($Owner, [string] $Text, [string] $Buttons = 'OK', [string] $Icon = 'Warning') {
+  if ($script:GuiNoDialogs) {
+    $script:GuiMessages.Add($Text)
+    return $(if ($Buttons -eq 'YesNo') { 'No' } else { 'OK' })
+  }
+  return [string][Windows.Forms.MessageBox]::Show($Owner, $Text, 'Twinbar', $Buttons, $Icon)
+}
+
+function Set-GuiStatus([string] $Text) {
+  if ($script:Gui) { $script:Gui.Status.Text = $Text }
+}
+
+function New-GuiFont([double] $Size = 9, [string] $Family = 'Segoe UI') {
+  New-Object Drawing.Font($Family, [single]$Size)
+}
+
+function New-GuiButton([string] $Text, [scriptblock] $OnClick) {
+  $b = New-Object Windows.Forms.Button
+  $b.Text = $Text
+  $b.AutoSize = $true
+  $b.AutoSizeMode = 'GrowAndShrink'
+  $b.Padding = New-Object Windows.Forms.Padding((Get-Scaled 10), (Get-Scaled 3), (Get-Scaled 10), (Get-Scaled 3))
+  $b.Margin = New-Object Windows.Forms.Padding(0, 0, (Get-Scaled 6), 0)
+  if ($OnClick) { $b.Add_Click($OnClick) }
+  return $b
+}
+
+# Runs one of the commands for the window: wait cursor, first line of its output
+# in the status bar, any error in a message box. Returns whether it worked.
+function Invoke-GuiAction([scriptblock] $Action, $Owner) {
+  if ($null -eq $Owner) { $Owner = $script:Gui.Form }
+  $output = New-Object System.Collections.Generic.List[string]
+  $Owner.UseWaitCursor = $true
+  [Windows.Forms.Application]::DoEvents()
+  try {
+    & $Action | ForEach-Object { $output.Add([string]$_) }
+    if ($output.Count) { Set-GuiStatus $output[0] }
+    return $true
+  } catch {
+    [void](Show-GuiMessage $Owner (ConvertTo-Sentence $_.Exception.Message))
+    return $false
+  } finally {
+    $Owner.UseWaitCursor = $false
+    if ($script:Gui) { Update-ProfileList }
+  }
+}
+
+function Get-ProfileBitmap($Record, [int] $Size) {
+  try {
+    if ($Record.icon -and (Test-Path -LiteralPath $Record.icon)) { return [TwinbarInterop.IconMaker]::Extract($Record.icon, 0, $Size) }
+    if ($Record.launchExe -and (Test-Path -LiteralPath $Record.launchExe)) { return [TwinbarInterop.IconMaker]::Extract($Record.launchExe, 0, $Size) }
+  } catch {
+    Write-Verbose "no icon for $($Record.id): $($_.Exception.Message)"
+  }
+  return $null
+}
+
+function Get-GuiRows {
+  $script:DataDirProcesses = $null
+  @(Get-AllProfiles | ForEach-Object {
+      $t = ConvertTo-ProfileTable $_
+      [pscustomobject]@{ Id = $t.id; FullName = "$($t.appName) $($t.name)"; Status = (Get-ProfileStatus $_); Look = (Get-LookNote $t); DataDir = $t.dataDir; Record = $t }
+    })
+}
+
+function Get-SelectedRow {
+  $g = $script:Gui
+  if ($null -eq $g -or $g.List.SelectedItems.Count -eq 0) { return $null }
+  $id = [string]$g.List.SelectedItems[0].Tag
+  $match = @($g.Rows | Where-Object { $_.Id -eq $id })
+  if ($match.Count) { return $match[0] }
+  return $null
+}
+
+function Update-GuiButtons {
+  $has = $null -ne (Get-SelectedRow)
+  foreach ($name in 'Edit', 'Open', 'Remove', 'Repair') { $script:Gui.Buttons[$name].Enabled = $has }
+}
+
+# Fills the list; with -Quiet (the timer), only refreshes the statuses unless
+# profiles came or went.
+function Update-ProfileList([switch] $Quiet) {
+  $g = $script:Gui
+  $rows = @(Get-GuiRows)
+  $sameProfiles = (@($rows | ForEach-Object { $_.Id }) -join '|') -eq (@($g.Rows | ForEach-Object { $_.Id }) -join '|')
+  if ($Quiet -and $sameProfiles -and $g.List.Items.Count -eq $rows.Count) {
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+      $sub = $g.List.Items[$i].SubItems[1]
+      if ($sub.Text -ne $rows[$i].Status) { $sub.Text = $rows[$i].Status }
+    }
+    $g.Rows = $rows
+    return
+  }
+  $selected = Get-SelectedRow
+  $g.List.BeginUpdate()
+  try {
+    $g.List.Items.Clear()
+    $g.Images.Images.Clear()
+    foreach ($r in $rows) {
+      $bitmap = Get-ProfileBitmap $r.Record $g.Images.ImageSize.Width
+      if ($bitmap) { $g.Images.Images.Add($r.Id, $bitmap) }
+      $item = New-Object Windows.Forms.ListViewItem
+      $item.Text = $r.FullName
+      $item.Tag = $r.Id
+      $item.ImageKey = $r.Id
+      foreach ($text in @($r.Status, $r.Look, $r.DataDir)) { [void]$item.SubItems.Add([string]$text) }
+      [void]$g.List.Items.Add($item)
+      if ($selected -and $selected.Id -eq $r.Id) { $item.Selected = $true }
+    }
+  } finally {
+    $g.List.EndUpdate()
+  }
+  $g.Rows = $rows
+  if (-not $rows.Count) { Set-GuiStatus 'No profiles yet. Click "New profile..." to make one.' }
+  Update-GuiButtons
+}
+
+function New-MainForm {
+  $form = New-Object Windows.Forms.Form
+  $form.Text = 'Twinbar'
+  $form.Font = New-GuiFont
+  $form.StartPosition = 'CenterScreen'
+  $form.ClientSize = New-Object Drawing.Size((Get-Scaled 860), (Get-Scaled 420))
+  $form.MinimumSize = New-Object Drawing.Size((Get-Scaled 600), (Get-Scaled 300))
+  try { $form.Icon = New-Object Drawing.Icon((Get-AppIconPath)) } catch { Write-Verbose "no window icon: $($_.Exception.Message)" }
+
+  $list = New-Object Windows.Forms.ListView
+  $list.View = 'Details'
+  $list.FullRowSelect = $true
+  $list.MultiSelect = $false
+  $list.HideSelection = $false
+  $list.Dock = 'Fill'
+  foreach ($column in @(@('Profile', 220), @('Status', 90), @('Icon', 240), @('Data folder', 280))) {
+    [void]$list.Columns.Add([string]$column[0], (Get-Scaled $column[1]))
+  }
+  $images = New-Object Windows.Forms.ImageList
+  $images.ColorDepth = 'Depth32Bit'
+  $images.ImageSize = New-Object Drawing.Size((Get-Scaled 24), (Get-Scaled 24))
+  $list.SmallImageList = $images
+
+  $buttons = New-Object Windows.Forms.FlowLayoutPanel
+  $buttons.Dock = 'Bottom'
+  $buttons.AutoSize = $true
+  $buttons.Padding = New-Object Windows.Forms.Padding((Get-Scaled 8))
+  $status = New-Object Windows.Forms.StatusStrip
+  $statusText = New-Object Windows.Forms.ToolStripStatusLabel
+  $statusText.Spring = $true
+  $statusText.TextAlign = 'MiddleLeft'
+  [void]$status.Items.Add($statusText)
+
+  $script:Gui = @{ Form = $form; List = $list; Images = $images; Status = $statusText; Rows = @(); Apps = $null; Buttons = @{} }
+  $g = $script:Gui
+  $g.Buttons.New = New-GuiButton 'New profile...' { Show-ProfileDialog $null }
+  $g.Buttons.Edit = New-GuiButton 'Edit...' { $row = Get-SelectedRow; if ($row) { Show-ProfileDialog $row } }
+  $g.Buttons.Open = New-GuiButton 'Open' { Open-SelectedProfile }
+  $g.Buttons.Remove = New-GuiButton 'Remove...' { $row = Get-SelectedRow; if ($row) { Show-RemoveDialog $row } }
+  $g.Buttons.Repair = New-GuiButton 'Repair' { Repair-SelectedProfile }
+  $g.Buttons.Check = New-GuiButton 'Check all' { Show-CheckDialog }
+  foreach ($name in 'New', 'Edit', 'Open', 'Remove', 'Repair', 'Check') { $buttons.Controls.Add($g.Buttons[$name]) }
+
+  $list.Add_SelectedIndexChanged({ Update-GuiButtons })
+  $list.Add_DoubleClick({ Open-SelectedProfile })
+  $list.Add_KeyDown({
+      param($control, $key)
+      if ($key.KeyCode -eq 'Return') { Open-SelectedProfile }
+      elseif ($key.KeyCode -eq 'Delete') { $row = Get-SelectedRow; if ($row) { Show-RemoveDialog $row } }
+    })
+
+  # Docking goes from the last control added to the first: status bar, buttons, then the list fills the rest.
+  $form.Controls.Add($list)
+  $form.Controls.Add($buttons)
+  $form.Controls.Add($status)
+  $form.AcceptButton = $null
+
+  $timer = New-Object Windows.Forms.Timer
+  $timer.Interval = 4000
+  $timer.Add_Tick({ Update-ProfileList -Quiet })
+  $g.Timer = $timer
+  $form.Add_Shown({
+      Update-ProfileList
+      if ($script:Gui.Rows.Count) { Set-GuiStatus ('{0} profile(s). Double-click one to open it.' -f $script:Gui.Rows.Count) }
+      $script:Gui.Timer.Start()
+    })
+  $form.Add_FormClosed({ $script:Gui.Timer.Stop(); $script:Gui.Timer.Dispose() })
+  return $form
+}
+
+function Open-SelectedProfile {
+  $row = Get-SelectedRow
+  if ($row) { [void](Invoke-GuiAction { Invoke-Open $row.Id }) }
+}
+
+function Select-AppFile($Owner) {
+  $dialog = New-Object Windows.Forms.OpenFileDialog
+  $dialog.Title = 'Find the app'
+  $dialog.Filter = 'Programs and shortcuts (*.exe;*.lnk)|*.exe;*.lnk|All files (*.*)|*.*'
+  $dialog.DereferenceLinks = $false
+  try {
+    if ($dialog.ShowDialog($Owner) -eq 'OK') { return $dialog.FileName }
+    return $null
+  } finally {
+    $dialog.Dispose()
+  }
+}
+
+function Repair-SelectedProfile {
+  $row = Get-SelectedRow
+  if (-not $row) { return }
+  $form = $script:Gui.Form
+  $form.UseWaitCursor = $true
+  [Windows.Forms.Application]::DoEvents()
+  $moved = $false
+  try {
+    $output = @(Invoke-Rebuild $row.Id)
+    if ($output.Count) { Set-GuiStatus ([string]$output[0]) }
+  } catch {
+    $message = $_.Exception.Message
+    if ($message -match 'If the app moved') { $moved = $true }
+    else { [void](Show-GuiMessage $form (ConvertTo-Sentence $message)) }
+  } finally {
+    $form.UseWaitCursor = $false
+  }
+  if ($moved) {
+    $answer = Show-GuiMessage $form "Twinbar can't find $($row.Record.appName) where it was. Show Twinbar where it is now?" 'YesNo' 'Question'
+    if ($answer -eq 'Yes') {
+      $file = Select-AppFile $form
+      if ($file) { [void](Invoke-GuiAction { Invoke-Rebuild $row.Id -AppPath $file }) }
+    }
+  }
+  Update-ProfileList
+}
+
+function Show-TextDialog([string] $Title, [string] $Text) {
+  $d = New-Object Windows.Forms.Form
+  $d.Text = $Title
+  $d.Font = New-GuiFont
+  $d.StartPosition = 'CenterParent'
+  $d.ShowInTaskbar = $false
+  $d.MinimizeBox = $false
+  $d.ClientSize = New-Object Drawing.Size((Get-Scaled 780), (Get-Scaled 440))
+  $box = New-Object Windows.Forms.TextBox
+  $box.Multiline = $true
+  $box.ReadOnly = $true
+  $box.ScrollBars = 'Both'
+  $box.WordWrap = $false
+  $box.Dock = 'Fill'
+  $box.Font = New-GuiFont 9 'Consolas'
+  $box.Text = $Text
+  $panel = New-Object Windows.Forms.FlowLayoutPanel
+  $panel.Dock = 'Bottom'
+  $panel.AutoSize = $true
+  $panel.FlowDirection = 'RightToLeft'
+  $panel.Padding = New-Object Windows.Forms.Padding((Get-Scaled 8))
+  $close = New-GuiButton 'Close' $null
+  $close.DialogResult = 'OK'
+  $panel.Controls.Add($close)
+  $d.Controls.Add($box)
+  $d.Controls.Add($panel)
+  $d.AcceptButton = $close
+  $d.CancelButton = $close
+  try { [void]$d.ShowDialog($script:Gui.Form) } finally { $d.Dispose() }
+}
+
+function Show-CheckDialog {
+  $form = $script:Gui.Form
+  $lines = New-Object System.Collections.Generic.List[string]
+  $form.UseWaitCursor = $true
+  [Windows.Forms.Application]::DoEvents()
+  try {
+    Invoke-Doctor '' | ForEach-Object { $lines.Add([string]$_) }
+  } catch {
+    $lines.Add((ConvertTo-Sentence $_.Exception.Message))
+  } finally {
+    $form.UseWaitCursor = $false
+  }
+  Show-TextDialog 'Check' ($lines -join "`r`n")
+}
+
+function New-RemoveDialog($Row) {
+  $d = New-Object Windows.Forms.Form
+  $d.Text = "Remove $($Row.FullName)"
+  $d.Font = New-GuiFont
+  $d.FormBorderStyle = 'FixedDialog'
+  $d.MaximizeBox = $false
+  $d.MinimizeBox = $false
+  $d.ShowInTaskbar = $false
+  $d.StartPosition = 'CenterParent'
+  $d.AutoSize = $true
+  $d.AutoSizeMode = 'GrowAndShrink'
+  $d.Padding = New-Object Windows.Forms.Padding((Get-Scaled 12))
+  $layout = New-Object Windows.Forms.FlowLayoutPanel
+  $layout.FlowDirection = 'TopDown'
+  $layout.AutoSize = $true
+  $title = New-Object Windows.Forms.Label
+  $title.Text = "Remove $($Row.FullName)?"
+  $title.Font = New-GuiFont 11
+  $title.AutoSize = $true
+  $text = New-Object Windows.Forms.Label
+  $text.Text = 'Its Start menu entry and icon go. Its sign-in and data are kept, so making the profile again brings them back.'
+  $text.AutoSize = $true
+  $text.MaximumSize = New-Object Drawing.Size((Get-Scaled 420), 0)
+  $text.Margin = New-Object Windows.Forms.Padding(0, (Get-Scaled 8), 0, (Get-Scaled 8))
+  $deleteData = New-Object Windows.Forms.CheckBox
+  $deleteData.Text = 'Also delete its sign-in and data (to the Recycle Bin)'
+  $deleteData.AutoSize = $true
+  $buttons = New-Object Windows.Forms.FlowLayoutPanel
+  $buttons.AutoSize = $true
+  $buttons.Margin = New-Object Windows.Forms.Padding(0, (Get-Scaled 12), 0, 0)
+  $ok = New-GuiButton 'Remove' $null
+  $ok.DialogResult = 'OK'
+  $cancel = New-GuiButton 'Cancel' $null
+  $cancel.DialogResult = 'Cancel'
+  $buttons.Controls.Add($ok)
+  $buttons.Controls.Add($cancel)
+  foreach ($c in @($title, $text, $deleteData, $buttons)) { $layout.Controls.Add($c) }
+  $d.Controls.Add($layout)
+  $d.AcceptButton = $ok
+  $d.CancelButton = $cancel
+  return @{ Form = $d; DeleteData = $deleteData; Row = $Row }
+}
+
+function Show-RemoveDialog($Row) {
+  $d = New-RemoveDialog $Row
+  try {
+    if ($d.Form.ShowDialog($script:Gui.Form) -eq 'OK') {
+      $withData = $d.DeleteData.Checked
+      [void](Invoke-GuiAction { Invoke-Remove $Row.Id -WithData:$withData })
+    }
+  } finally {
+    $d.Form.Dispose()
+  }
+}
+
+# --- the New / Edit dialog ---
+
+function Get-ColorItemHex([string] $Text) {
+  if (-not $Text) { return $null }
+  $key = $Text.ToLowerInvariant()
+  if ($script:Palette.Contains($key)) { return $script:Palette[$key] }
+  if ($Text -match '^#[0-9A-Fa-f]{6}$') { return $Text.ToUpperInvariant() }
+  return $null
+}
+
+function Select-ColorItem($Combo, [string] $Hex) {
+  foreach ($item in @($Combo.Items)) {
+    if ((Get-ColorItemHex ([string]$item)) -eq $Hex) { $Combo.SelectedItem = $item; return }
+  }
+  $Combo.Items.Insert($Combo.Items.Count - 1, $Hex)
+  $Combo.SelectedItem = $Hex
+}
+
+function Format-AppItem($App) {
+  if ($App.Kind -eq 'store') { return "$($App.Name) (Microsoft Store)" }
+  return [string]$App.Name
+}
+
+function Get-DialogApp($State) {
+  $i = $State.App.SelectedIndex
+  if ($i -lt 0 -or $i -ge $State.AppList.Count) { return $null }
+  return $State.AppList[$i]
+}
+
+function Get-DialogBadge($State) {
+  $t = $State.Badge.Text.Trim()
+  if ($t) { return $t.ToUpperInvariant() }
+  $n = $State.Name.Text.Trim()
+  if ($n) { return ([Globalization.StringInfo]::GetNextTextElement($n)).ToUpperInvariant() }
+  return ''
+}
+
+function Update-ProfilePreview($State) {
+  $source = if ($State.Row) { $State.Row.Record.launchExe } else { $a = Get-DialogApp $State; if ($a) { $a.LaunchExe } else { '' } }
+  $bitmap = $null
+  if ($source) {
+    $hex = Get-ColorItemHex ([string]$State.Color.SelectedItem)
+    if (-not $hex) { $hex = '#0090FF' }
+    $look = $script:StyleNames[[string]$State.Style.SelectedItem]
+    try { $bitmap = [TwinbarInterop.IconMaker]::Preview($source, $look, $hex, (Get-DialogBadge $State), $State.Preview.Width) } catch { $bitmap = $null }
+  }
+  $old = $State.Preview.Image
+  $State.Preview.Image = $bitmap
+  if ($old) { $old.Dispose() }
+}
+
+# For a new profile, the colour follows the name (as on the command line) until
+# it's picked by hand.
+function Update-DefaultColor($State) {
+  if ($State.Row -or $State.ColorPicked) { return }
+  $a = Get-DialogApp $State
+  $appKey = if ($a) { $a.Id } else { 'app' }
+  $hex = Resolve-ProfileColor '' ('{0}.{1}' -f $appKey, (Get-NameKey $State.Name.Text.Trim()))
+  $State.Updating = $true
+  try { Select-ColorItem $State.Color $hex } finally { $State.Updating = $false }
+}
+
+function New-ProfileDialog($Row) {
+  $editing = $null -ne $Row
+  $d = New-Object Windows.Forms.Form
+  $d.Text = $(if ($editing) { "Edit $($Row.FullName)" } else { 'New profile' })
+  $d.Font = New-GuiFont
+  $d.FormBorderStyle = 'FixedDialog'
+  $d.MaximizeBox = $false
+  $d.MinimizeBox = $false
+  $d.ShowInTaskbar = $false
+  $d.StartPosition = 'CenterParent'
+  $d.AutoSize = $true
+  $d.AutoSizeMode = 'GrowAndShrink'
+  $d.Padding = New-Object Windows.Forms.Padding((Get-Scaled 12))
+
+  $grid = New-Object Windows.Forms.TableLayoutPanel
+  $grid.AutoSize = $true
+  $grid.ColumnCount = 3
+  $wide = Get-Scaled 280
+
+  $app = New-Object Windows.Forms.ComboBox
+  $app.DropDownStyle = 'DropDownList'
+  $app.Width = $wide
+  $browse = New-GuiButton 'Find...' $null
+  $appRow = New-Object Windows.Forms.FlowLayoutPanel
+  $appRow.AutoSize = $true
+  $appRow.WrapContents = $false
+  $appRow.Margin = New-Object Windows.Forms.Padding(0)
+  $appRow.Controls.Add($app)
+  $appRow.Controls.Add($browse)
+  $name = New-Object Windows.Forms.TextBox
+  $name.Width = $wide
+  $color = New-Object Windows.Forms.ComboBox
+  $color.DropDownStyle = 'DropDownList'
+  $color.DrawMode = 'OwnerDrawFixed'
+  $color.ItemHeight = Get-Scaled 18
+  $color.Width = $wide
+  foreach ($key in $script:Palette.Keys) { [void]$color.Items.Add($key.Substring(0, 1).ToUpperInvariant() + $key.Substring(1)) }
+  [void]$color.Items.Add('Custom...')
+  $badge = New-Object Windows.Forms.TextBox
+  $badge.Width = Get-Scaled 60
+  $badge.MaxLength = 4
+  $style = New-Object Windows.Forms.ComboBox
+  $style.DropDownStyle = 'DropDownList'
+  $style.Width = $wide
+  foreach ($key in $script:StyleNames.Keys) { [void]$style.Items.Add($key) }
+  $appearance = New-Object Windows.Forms.ComboBox
+  $appearance.DropDownStyle = 'DropDownList'
+  $appearance.Width = $wide
+  foreach ($key in $script:AppearanceNames.Keys) { [void]$appearance.Items.Add($key) }
+  $preview = New-Object Windows.Forms.PictureBox
+  $preview.Size = New-Object Drawing.Size((Get-Scaled 128), (Get-Scaled 128))
+  $preview.SizeMode = 'Zoom'
+  $preview.Margin = New-Object Windows.Forms.Padding((Get-Scaled 16), 0, 0, 0)
+  $hint = New-Object Windows.Forms.Label
+  $hint.Text = "Leave the badge empty for the name's first letter. Light and dark work for apps that follow Windows."
+  $hint.AutoSize = $true
+  $hint.MaximumSize = New-Object Drawing.Size(($wide + (Get-Scaled 90)), 0)
+  $hint.ForeColor = [Drawing.SystemColors]::GrayText
+
+  $rowIndex = 0
+  foreach ($pair in @(@('App', $appRow), @('Name', $name), @('Colour', $color), @('Badge', $badge), @('Icon', $style), @('Appearance', $appearance))) {
+    $label = New-Object Windows.Forms.Label
+    $label.Text = [string]$pair[0]
+    $label.AutoSize = $true
+    $label.Anchor = 'Left'
+    $grid.Controls.Add($label, 0, $rowIndex)
+    $pair[1].Margin = New-Object Windows.Forms.Padding(0, (Get-Scaled 3), 0, (Get-Scaled 3))
+    $grid.Controls.Add($pair[1], 1, $rowIndex)
+    $rowIndex++
+  }
+  $grid.Controls.Add($preview, 2, 0)
+  $grid.SetRowSpan($preview, 6)
+  $grid.Controls.Add($hint, 1, $rowIndex)
+  $grid.SetColumnSpan($hint, 2)
+  $rowIndex++
+  $buttons = New-Object Windows.Forms.FlowLayoutPanel
+  $buttons.AutoSize = $true
+  $buttons.FlowDirection = 'RightToLeft'
+  $buttons.Anchor = 'Right'
+  $buttons.Margin = New-Object Windows.Forms.Padding(0, (Get-Scaled 12), 0, 0)
+  $cancel = New-GuiButton 'Cancel' $null
+  $cancel.DialogResult = 'Cancel'
+  $ok = New-GuiButton $(if ($editing) { 'Save' } else { 'Create' }) $null
+  $buttons.Controls.Add($cancel)
+  $buttons.Controls.Add($ok)
+  $grid.Controls.Add($buttons, 0, $rowIndex)
+  $grid.SetColumnSpan($buttons, 3)
+  $d.Controls.Add($grid)
+  $d.AcceptButton = $ok
+  $d.CancelButton = $cancel
+
+  $appList = New-Object System.Collections.Generic.List[object]
+  $state = @{
+    Form = $d; Row = $Row; App = $app; AppList = $appList; Browse = $browse; Name = $name; Color = $color
+    Badge = $badge; Style = $style; Appearance = $appearance; Preview = $preview; Ok = $ok; ColorPicked = $false; Updating = $true
+  }
+  $script:Dialog = $state
+
+  if ($editing) {
+    $r = $Row.Record
+    $appList.Add([pscustomobject]@{ Name = $r.appName; Kind = $r.appKind; Source = $r.launchExe; LaunchExe = $r.launchExe; Id = $r.appId })
+    [void]$app.Items.Add([string]$r.appName)
+    $app.SelectedIndex = 0
+    $app.Enabled = $false
+    $browse.Enabled = $false
+    $name.Text = $r.name
+    $name.Enabled = $false
+    $badge.Text = $r.badge
+    Select-ColorItem $color $r.color
+    $style.SelectedItem = @($script:StyleNames.Keys | Where-Object { $script:StyleNames[$_] -eq $r.style })[0]
+    $appearance.SelectedItem = @($script:AppearanceNames.Keys | Where-Object { $script:AppearanceNames[$_] -eq $r.appearance })[0]
+  } else {
+    $apps = if ($script:Gui -and $script:Gui.Apps) { @($script:Gui.Apps) } else { @() }
+    foreach ($a in $apps) { $appList.Add($a); [void]$app.Items.Add((Format-AppItem $a)) }
+    if ($app.Items.Count) { $app.SelectedIndex = 0 }
+    $style.SelectedIndex = 0
+    $appearance.SelectedIndex = 0
+    $state.Updating = $false
+    Update-DefaultColor $state
+  }
+  $state.Updating = $false
+
+  $color.Add_DrawItem({
+      param($control, $draw)
+      $draw.DrawBackground()
+      if ($draw.Index -ge 0) {
+        $text = [string]$control.Items[$draw.Index]
+        $hex = Get-ColorItemHex $text
+        $side = $draw.Bounds.Height - (Get-Scaled 6)
+        $swatch = New-Object Drawing.Rectangle(($draw.Bounds.X + (Get-Scaled 3)), ($draw.Bounds.Y + (Get-Scaled 3)), $side, $side)
+        if ($hex) {
+          $brush = New-Object Drawing.SolidBrush([Drawing.ColorTranslator]::FromHtml($hex))
+          $draw.Graphics.FillRectangle($brush, $swatch)
+          $brush.Dispose()
+        }
+        $textBrush = New-Object Drawing.SolidBrush($draw.ForeColor)
+        $draw.Graphics.DrawString($text, $draw.Font, $textBrush, [single]($swatch.Right + (Get-Scaled 6)), [single]($draw.Bounds.Y + 1))
+        $textBrush.Dispose()
+      }
+      $draw.DrawFocusRectangle()
+    })
+  $color.Add_SelectedIndexChanged({
+      $s = $script:Dialog
+      if ($s.Updating) { return }
+      if ([string]$s.Color.SelectedItem -eq 'Custom...') {
+        $picker = New-Object Windows.Forms.ColorDialog
+        $picker.FullOpen = $true
+        $s.Updating = $true
+        try {
+          if ($picker.ShowDialog($s.Form) -eq 'OK') {
+            Select-ColorItem $s.Color ('#{0:X2}{1:X2}{2:X2}' -f $picker.Color.R, $picker.Color.G, $picker.Color.B)
+          } else {
+            $s.Color.SelectedIndex = 0
+          }
+        } finally {
+          $s.Updating = $false
+          $picker.Dispose()
+        }
+      }
+      $s.ColorPicked = $true
+      Update-ProfilePreview $s
+    })
+  $app.Add_SelectedIndexChanged({ $s = $script:Dialog; if (-not $s.Updating) { Update-DefaultColor $s; Update-ProfilePreview $s } })
+  $name.Add_TextChanged({ $s = $script:Dialog; Update-DefaultColor $s; Update-ProfilePreview $s })
+  $badge.Add_TextChanged({ Update-ProfilePreview $script:Dialog })
+  $style.Add_SelectedIndexChanged({ if (-not $script:Dialog.Updating) { Update-ProfilePreview $script:Dialog } })
+  $browse.Add_Click({
+      $s = $script:Dialog
+      $file = Select-AppFile $s.Form
+      if (-not $file) { return }
+      try {
+        $found = Resolve-ElectronApp $file
+      } catch {
+        [void](Show-GuiMessage $s.Form (ConvertTo-Sentence $_.Exception.Message))
+        return
+      }
+      $s.AppList.Add([pscustomobject]@{ Name = $found.Name; Kind = $found.Kind; Source = $file; LaunchExe = $found.LaunchExe; Id = $found.Id })
+      [void]$s.App.Items.Add((Format-AppItem $found))
+      $s.App.SelectedIndex = $s.App.Items.Count - 1
+    })
+  $ok.Add_Click({
+      $s = $script:Dialog
+      if (Submit-ProfileDialog $s) {
+        $s.Form.DialogResult = 'OK'
+        $s.Form.Close()
+      }
+    })
+  return $state
+}
+
+# Makes or changes the profile from the dialog's fields; returns whether it worked.
+function Submit-ProfileDialog($State) {
+  $hex = Get-ColorItemHex ([string]$State.Color.SelectedItem)
+  $look = $script:StyleNames[[string]$State.Style.SelectedItem]
+  $theme = $script:AppearanceNames[[string]$State.Appearance.SelectedItem]
+  if ($State.Row) {
+    $id = $State.Row.Id
+    $letters = Get-DialogBadge $State
+    return (Invoke-GuiAction { Invoke-Change -Which $id -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme } $State.Form)
+  }
+  $chosen = Get-DialogApp $State
+  if (-not $chosen) {
+    [void](Show-GuiMessage $State.Form 'Pick an app first, or find it with "Find...".')
+    return $false
+  }
+  $source = $chosen.Source
+  $label = $State.Name.Text
+  $letters = $State.Badge.Text.Trim()
+  return (Invoke-GuiAction { Invoke-New -AppPath $source -ProfileName $label -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme } $State.Form)
+}
+
+function Show-ProfileDialog($Row) {
+  if (-not $Row -and $null -eq $script:Gui.Apps) {
+    $script:Gui.Form.UseWaitCursor = $true
+    Set-GuiStatus 'Looking for apps...'
+    [Windows.Forms.Application]::DoEvents()
+    try { $script:Gui.Apps = @(Find-ElectronApps) } finally { $script:Gui.Form.UseWaitCursor = $false }
+    Set-GuiStatus ("Found {0} app(s) to make profiles of." -f $script:Gui.Apps.Count)
+  }
+  $state = New-ProfileDialog $Row
+  try {
+    Update-ProfilePreview $state
+    [void]$state.Form.ShowDialog($script:Gui.Form)
+  } finally {
+    if ($state.Preview.Image) { $state.Preview.Image.Dispose() }
+    $state.Form.Dispose()
+    $script:Dialog = $null
+  }
+}
+
+function Show-TwinbarWindow {
+  Initialize-Forms
+  [Windows.Forms.Application]::EnableVisualStyles()
+  try {
+    $form = New-MainForm
+    [Windows.Forms.Application]::Run($form)
+  } catch {
+    [void](Show-GuiMessage $null ("Twinbar couldn't open its window: " + $_.Exception.Message) 'OK' 'Error')
+    throw
+  }
 }
 
 function Show-Help {
@@ -1908,6 +2952,16 @@ Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Ele
   twinbar remove PROFILE [-DeleteData]
       Remove a profile's shortcut (to the Recycle Bin). Its sign-in is kept
       unless you add -DeleteData.
+  twinbar apps [-Json]
+      List the Electron apps found in the Start menu and the Microsoft Store.
+  twinbar gui
+      Open the Twinbar window.
+  twinbar install [-Dir DIR] [-AddToPath] [-ShortcutDir DIR]
+      Install Twinbar for you (no admin rights): the Twinbar window in the
+      Start menu, in $(Get-DefaultInstallDir) unless -Dir says otherwise.
+      -AddToPath lets you type twinbar in any terminal.
+  twinbar uninstall
+      Remove the installed Twinbar. Profiles stay and keep working.
   twinbar version
 
 PROFILE is a name ("Work"), a full name ("Postman Work") or an id ("postman.work").
@@ -1926,6 +2980,10 @@ function Invoke-Twinbar {
     'change' { Invoke-Change -Which $Target -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance }
     'rebuild' { Invoke-Rebuild -Which $Target -AppPath $App -Every:$All }
     'doctor' { Invoke-Doctor $Target }
+    'apps' { Invoke-Apps -AsJson:$Json }
+    'gui' { Show-TwinbarWindow }
+    'install' { Invoke-Install -Folder $Dir -MenuDir $ShortcutDir -OnPath:$AddToPath }
+    'uninstall' { Invoke-Uninstall -Folder $Dir }
     'list' { Invoke-List -AsJson:$Json }
     'open' { Invoke-Open $Target }
     'remove' { Invoke-Remove $Target -WithData:$DeleteData }

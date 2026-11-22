@@ -8,8 +8,8 @@ Twinbar is built in five phases. Each phase ends with working, tested code on
 | 1 | Core command line: profiles with their own sign-in, from the Start menu | Done (0.1.0) |
 | 2 | Own icon and own taskbar button | Done (0.2.0) |
 | 3 | Change and repair profiles; light/dark; Microsoft Store apps | Done (0.3.0) |
-| 4 | The Twinbar app: windows and forms, no terminal needed | Next |
-| 5 | CI, signed releases, winget/Scoop, docs | Planned |
+| 4 | The Twinbar app: windows and forms, no terminal needed | Done (0.4.0) |
+| 5 | CI, signed releases, winget/Scoop, docs | Next |
 
 ## Phase 1: core command line
 
@@ -106,10 +106,35 @@ pin.
 
 ## Phase 4: the Twinbar app
 
-- A window (WinForms, from the same script): the profiles list, a New/Edit
-  form with an icon preview, and a Remove dialog.
-- `install` / `uninstall`: copy Twinbar to `%LOCALAPPDATA%\Programs\Twinbar`,
-  add it to the Start menu and optionally put `twinbar` on PATH. No admin rights.
+- The window, in WinForms, built in code inside `twinbar.ps1`: the profiles
+  with icons and status (refreshed every 4 s); New and Edit with a live
+  preview (`IconMaker.Preview`), colour swatches and any custom colour, the
+  colour following the name as on the command line until picked by hand;
+  Open; Remove, asking about the sign-in; Repair, asking where a moved app
+  went; Check all (`doctor`). Every button calls the same `Invoke-*` function
+  as the command line. Sized for the screen's DPI.
+- `Twinbar.exe`: a small C# host, compiled by `install` like the launcher, that
+  runs `twinbar.ps1 gui` in a PowerShell runspace, so there's no console. It
+  sets its own AppUserModelID (`Twinbar.App`, matching its Start menu entry),
+  is DPI-aware, opens only once (a second start brings the window forward) and
+  has Twinbar's own icon (two overlapping windows, drawn like the profile icons).
+- `install [-Dir] [-AddToPath]` / `uninstall`: `%LOCALAPPDATA%\Programs\Twinbar`
+  by default, no admin rights; the user PATH entry is added and removed only if
+  asked, with a settings-changed broadcast so new terminals see it. Uninstall
+  leaves the profiles working (their launcher lives in `%APPDATA%\Twinbar`).
+- `apps [-Json]`: Electron apps from the Start menu (a cheap look at each
+  shortcut's folder first) and from the Store packages' manifests. Found 10 on
+  the development machine, including Cursor, pgAdmin and two Store apps.
+
+Measured: normal start of the window 1.5 s; the very first start of a freshly
+compiled `Twinbar.exe` took over 20 s, most likely Windows checking the new
+program. Windows PowerShell's UI Automation client sees the window's controls
+only as plain panes, so the tests read the list's row count with
+`LVM_GETITEMCOUNT` instead.
+
+Done: 276 checks (289 with a real app), including the dialogs filled in and
+submitted, and the installed `Twinbar.exe` opening, listing, staying single and
+closing.
 
 ## Phase 5: CI, releases and docs
 

@@ -26,6 +26,7 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('twinbar test ' + [guid]::NewGuid(
 $twHome = Join-Path $root 'home'
 $menu = Join-Path $root 'start menu'
 $pinned = Join-Path $root 'pinned'
+$startMenu = Join-Path $root 'fake start menu'
 # Store apps' data must live outside AppData; the temp folder usually is inside it.
 $storeData = if ($root.StartsWith([Environment]::GetFolderPath('UserProfile') + '\AppData\', [StringComparison]::OrdinalIgnoreCase)) {
   Join-Path ([Environment]::GetFolderPath('UserProfile')) ('twinbar-test-' + (Split-Path -Leaf $root).Substring(13))
@@ -91,6 +92,8 @@ function Invoke-Cli([string[]] $Arguments) {
   $psi.EnvironmentVariables['TWINBAR_HOME'] = $twHome
   $psi.EnvironmentVariables['TWINBAR_PINNED_DIR'] = $pinned
   $psi.EnvironmentVariables['TWINBAR_STORE_DATA'] = $storeData
+  $psi.EnvironmentVariables['TWINBAR_SHORTCUT_DIR'] = $menu
+  $psi.EnvironmentVariables['TWINBAR_START_MENU'] = $startMenu
   $proc = [Diagnostics.Process]::Start($psi)
   $out = $proc.StandardOutput.ReadToEndAsync()
   $err = $proc.StandardError.ReadToEndAsync()
@@ -249,7 +252,16 @@ try {
   $env:TWINBAR_HOME = $twHome
   $env:TWINBAR_PINNED_DIR = $pinned
   $env:TWINBAR_STORE_DATA = $storeData
+  $env:TWINBAR_SHORTCUT_DIR = $menu
+  $env:TWINBAR_START_MENU = $startMenu
   . $cli
+
+  Assert-Equal 'C:\a;C:\b;C:\c' (Add-PathEntry 'C:\a;C:\b' 'C:\c') 'PATH: an entry is added at the end'
+  Assert-Equal 'C:\a;C:\b' (Add-PathEntry 'C:\a;C:\b' 'C:\B\') 'PATH: an entry already there is not added twice'
+  Assert-Equal 'C:\a;C:\c' (Remove-PathEntry 'C:\a;C:\b\;C:\c' 'C:\b') 'PATH: an entry is removed'
+  Assert-Equal 'The app is gone.' (ConvertTo-Sentence 'the app is gone') 'messages read as sentences in the window'
+  Assert-Equal '#8E4EC6' (Get-ColorItemHex 'Purple') 'window: colour names map to the palette'
+  Assert-Equal '#12ABEF' (Get-ColorItemHex '#12abef') 'window: custom colours'
 
   $links = Join-Path $root 'links'
   [void][IO.Directory]::CreateDirectory($links)
@@ -638,6 +650,175 @@ try {
   Assert-Cli (Invoke-Cli @('list')) 0 'No profiles yet' 'no profiles left'
 
   # -------------------------------------------------------------------------
+  Write-Section 'Finding apps'
+  [void][IO.Directory]::CreateDirectory((Join-Path $startMenu 'Vendor'))
+  Save-ShellLink -Path (Join-Path $startMenu 'Fake App.lnk') -TargetPath $stdExe
+  Save-ShellLink -Path (Join-Path $startMenu 'Vendor\Fake Squirrel.lnk') -TargetPath $sqExe
+  Save-ShellLink -Path (Join-Path $startMenu 'Not Electron.lnk') -TargetPath (Join-Path $plain 'FakeApp.exe')
+  Save-ShellLink -Path (Join-Path $startMenu 'Fake App Someone.lnk') -TargetPath $launcher -Arguments 'fakeapp.someone' -AppUserModelId 'Twinbar.fakeapp.someone'
+  $r = Invoke-Cli @('apps', '-Json')
+  Assert-Equal 0 $r.Code 'apps -Json'
+  $apps = @((ConvertFrom-Json $r.Out) | ForEach-Object { $_ })
+  Assert-Equal 'standard' (@($apps | Where-Object { $_.Name -eq 'Fake App' }) | ForEach-Object { $_.Kind }) 'apps: a normal install in the Start menu'
+  Assert-Equal 'squirrel' (@($apps | Where-Object { $_.Name -eq 'Fake Squirrel' }) | ForEach-Object { $_.Kind }) 'apps: a Squirrel install, in a Start menu folder'
+  Assert-Equal 0 @($apps | Where-Object { $_.Name -eq 'Not Electron' }).Count "apps: a program that isn't Electron is left out"
+  Assert-Equal 0 @($apps | Where-Object { $_.Source -like '*Fake App Someone*' }).Count "apps: Twinbar's own profiles are left out"
+  Assert-Cli (Invoke-Cli @('apps')) 0 'Fake Squirrel\s+squirrel' 'apps shows a table'
+
+  # -------------------------------------------------------------------------
+  Write-Section 'The window'
+  Initialize-Forms
+  [Windows.Forms.Application]::EnableVisualStyles()
+  $script:GuiNoDialogs = $true
+  Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Listed', '-Color', 'teal')) 0 'Made' 'a profile to list'
+  $mainForm = New-MainForm
+  $mainForm.Opacity = 0
+  $mainForm.ShowInTaskbar = $false
+  $mainForm.Show()
+  [Windows.Forms.Application]::DoEvents()
+  try {
+    Assert-Equal 'Fake App Listed' (@($script:Gui.List.Items | ForEach-Object { $_.Text }) -join ',') 'the window lists the profiles'
+    Assert-Equal 'ready' $script:Gui.List.Items[0].SubItems[1].Text 'with their status'
+    Assert-Equal 1 $script:Gui.Images.Images.Count 'and their icons'
+    Assert-True ($script:Gui.Status.Text -match '1 profile') 'the status bar counts them'
+    Assert-True (-not $script:Gui.Buttons.Edit.Enabled) 'Edit is off with nothing selected'
+    $script:Gui.List.Items[0].Selected = $true
+    [Windows.Forms.Application]::DoEvents()
+    Assert-True ($script:Gui.Buttons.Edit.Enabled -and $script:Gui.Buttons.Remove.Enabled) 'Edit and Remove come on with a profile selected'
+
+    $script:Gui.Apps = @([pscustomobject]@{ Name = 'Fake App'; Kind = 'standard'; Source = $stdExe; LaunchExe = $stdExe; Id = 'fakeapp' })
+    $dialog = New-ProfileDialog $null
+    Assert-Equal 'Fake App' ([string]$dialog.App.SelectedItem) 'New: the app is picked'
+    $dialog.Name.Text = 'Windowed'
+    Assert-Equal (Resolve-ProfileColor '' 'fakeapp.windowed') (Get-ColorItemHex ([string]$dialog.Color.SelectedItem)) 'New: the colour follows the name, as on the command line'
+    $dialog.Color.SelectedItem = 'Purple'
+    Update-ProfilePreview $dialog
+    Assert-True ($null -ne $dialog.Preview.Image) 'New: the icon is previewed'
+    Assert-True ((Get-HueDistance (Get-MainHue (New-Object Drawing.Bitmap $dialog.Preview.Image)) 272) -lt 20) 'New: the preview is purple'
+    Assert-True (Submit-ProfileDialog $dialog) 'New: Create makes the profile'
+    $made = Read-Record 'fakeapp.windowed'
+    Assert-Equal '#8E4EC6|W|tint+badge' ('{0}|{1}|{2}' -f $made.color, $made.badge, $made.style) 'New: with the look picked in the window'
+    $dialog.Form.Dispose()
+    Assert-Equal 2 $script:Gui.List.Items.Count 'the list shows the new profile'
+
+    $bad = New-ProfileDialog $null
+    $bad.Name.Text = 'Bad!'
+    $script:GuiMessages.Clear()
+    Assert-True (-not (Submit-ProfileDialog $bad)) 'New: a bad name is refused'
+    Assert-True ($script:GuiMessages.Count -and $script:GuiMessages[0] -match '^The profile name may use letters') 'with a message that says why' ($script:GuiMessages -join ' | ')
+    $bad.Form.Dispose()
+
+    $row = @($script:Gui.Rows | Where-Object { $_.Id -eq 'fakeapp.windowed' })[0]
+    $edit = New-ProfileDialog $row
+    Assert-True (-not $edit.Name.Enabled -and -not $edit.App.Enabled) "Edit: the app and name can't change"
+    Assert-Equal 'Purple' ([string]$edit.Color.SelectedItem) 'Edit: shows the colour'
+    Select-ColorItem $edit.Color '#123456'
+    Assert-Equal '#123456' ([string]$edit.Color.SelectedItem) 'Edit: a custom colour'
+    $edit.Appearance.SelectedItem = 'Dark'
+    Assert-True (Submit-ProfileDialog $edit) 'Edit: Save changes it'
+    $changedInWindow = Read-Record 'fakeapp.windowed'
+    Assert-Equal '#123456|dark|W' ('{0}|{1}|{2}' -f $changedInWindow.color, $changedInWindow.appearance, $changedInWindow.badge) 'Edit: with the new look'
+    $edit.Form.Dispose()
+
+    $removeDialog = New-RemoveDialog $row
+    Assert-True (-not $removeDialog.DeleteData.Checked) 'Remove: keeps the sign-in unless asked'
+    $removeDialog.Form.Dispose()
+  } finally {
+    $mainForm.Close()
+    $mainForm.Dispose()
+    $script:Gui = $null
+  }
+  Assert-Cli (Invoke-Cli @('remove', 'fakeapp.listed', '-DeleteData')) 0 'Removed' 'remove Listed'
+  Assert-Cli (Invoke-Cli @('remove', 'fakeapp.windowed', '-DeleteData')) 0 'Removed' 'remove Windowed'
+
+  # -------------------------------------------------------------------------
+  Write-Section 'Installing'
+  $installDir = Join-Path $root 'installed twinbar'
+  Assert-Cli (Invoke-Cli @('install', '-Dir', $installDir)) 0 'Installed Twinbar' 'install'
+  foreach ($file in 'twinbar.ps1', 'twinbar.cmd', 'Twinbar.exe', 'twinbar.ico', 'LICENSE', 'README.md', '.twinbar-install') {
+    Assert-True (Test-Path -LiteralPath (Join-Path $installDir $file)) "installed $file"
+  }
+  $appExe = Join-Path $installDir 'Twinbar.exe'
+  Assert-Equal "$version.0" ([Diagnostics.FileVersionInfo]::GetVersionInfo($appExe).FileVersion) "Twinbar.exe is version $version"
+  $appLink = Join-Path $menu 'Twinbar.lnk'
+  if (Test-Path -LiteralPath $appLink) {
+    $al = Read-ShellLink $appLink
+    Assert-Equal "$appExe|Twinbar.App" ('{0}|{1}' -f $al.TargetPath, $al.AppUserModelId) 'the Start menu has Twinbar, with its own taskbar ID'
+  } else {
+    Assert-True $false 'the Start menu has Twinbar'
+  }
+  $cmd = New-Object Diagnostics.ProcessStartInfo
+  $cmd.FileName = Join-Path $env:WINDIR 'System32\cmd.exe'
+  $cmd.Arguments = '/c ""' + (Join-Path $installDir 'twinbar.cmd') + '" version"'
+  $cmd.UseShellExecute = $false
+  $cmd.RedirectStandardOutput = $true
+  $cmd.CreateNoWindow = $true
+  $cmdProc = [Diagnostics.Process]::Start($cmd)
+  $cmdOut = $cmdProc.StandardOutput.ReadToEnd()
+  $cmdProc.WaitForExit()
+  Assert-True ($cmdOut -match [regex]::Escape("twinbar $version")) 'the installed twinbar.cmd runs' $cmdOut
+  Assert-Cli (Invoke-Cli @('install', '-Dir', $installDir)) 0 'Installed' 'installing again over it'
+  $busy = Join-Path $root 'busy folder'
+  [void][IO.Directory]::CreateDirectory($busy)
+  [IO.File]::WriteAllText((Join-Path $busy 'mine.txt'), 'x')
+  Assert-Cli (Invoke-Cli @('install', '-Dir', $busy)) 1 'other files' "a folder with other files isn't used"
+  Assert-Cli (Invoke-Cli @('install', '-Dir', [Environment]::GetFolderPath('UserProfile'))) 1 "can't be Twinbar's folder" "the user folder isn't used"
+
+  Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Shown')) 0 'Made' 'a profile for the window'
+  # (Not $app: the dot-sourced script has a [string] $App, and names ignore case.)
+  $appProcess = [Diagnostics.Process]::Start($appExe)
+  $windowUp = Wait-Until { $appProcess.Refresh(); $appProcess.MainWindowHandle -ne [IntPtr]::Zero } 90
+  Assert-True $windowUp 'Twinbar.exe opens its window'
+  if ($windowUp) {
+    Assert-Equal 'Twinbar' $appProcess.MainWindowTitle 'titled Twinbar'
+    # Windows PowerShell's UI Automation client only sees the window's controls as
+    # plain panes, so the list is asked for its row count directly.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class TwinbarTestWindows {
+  delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr lParam);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hwnd, StringBuilder name, int size);
+  [DllImport("user32.dll")] static extern IntPtr SendMessageW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
+  public static int ListRows(IntPtr window) {
+    int rows = -1;
+    EnumChildWindows(window, delegate (IntPtr hwnd, IntPtr lParam) {
+      StringBuilder name = new StringBuilder(256);
+      GetClassNameW(hwnd, name, name.Capacity);
+      if (name.ToString().Contains("SysListView32")) { rows = (int)SendMessageW(hwnd, 0x1004, IntPtr.Zero, IntPtr.Zero); return false; }
+      return true;
+    }, IntPtr.Zero);
+    return rows;
+  }
+}
+'@
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    $listed = Wait-Until { [TwinbarTestWindows]::ListRows($appProcess.MainWindowHandle) -eq 1 } 15
+    Assert-True $listed 'the window lists the profile' "rows: $([TwinbarTestWindows]::ListRows($appProcess.MainWindowHandle))"
+    $element = [System.Windows.Automation.AutomationElement]::FromHandle($appProcess.MainWindowHandle)
+    $windowNames = @($element.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name })
+    Assert-True ($windowNames -contains 'New profile...' -and $windowNames -contains 'Check all') 'and has its buttons'
+    $second = [Diagnostics.Process]::Start($appExe)
+    Assert-True ($second.WaitForExit(20000) -and $second.ExitCode -eq 0) 'a second Twinbar.exe just brings the window forward'
+    Assert-True (-not $appProcess.HasExited) 'the first one stays open'
+    if ($null -ne (Get-TaskbarAppIds)) {
+      Assert-True (Wait-Until { (Get-TaskbarAppIds) -contains 'Twinbar.App' } 10) 'Twinbar has a taskbar button of its own'
+    }
+    [void]$appProcess.CloseMainWindow()
+    Assert-True ($appProcess.WaitForExit(15000) -and $appProcess.ExitCode -eq 0) 'closing the window ends Twinbar.exe'
+  }
+  if (-not $appProcess.HasExited) { $appProcess.Kill() }
+  Assert-Cli (Invoke-Cli @('remove', 'fakeapp.shown', '-DeleteData')) 0 'Removed' 'remove Shown'
+
+  $r = Invoke-Cli @('uninstall')
+  Assert-Cli $r 0 'Uninstalled Twinbar' 'uninstall'
+  Assert-True (-not (Test-Path -LiteralPath $installDir)) 'its folder is gone'
+  Assert-True (-not (Test-Path -LiteralPath $appLink)) 'its Start menu entry is gone'
+  Assert-Cli (Invoke-Cli @('uninstall', '-Dir', $installDir)) 1 "isn't installed" "uninstalling what isn't there fails"
+
+  # -------------------------------------------------------------------------
   if ($RealApp) {
     Write-Section "Real app: $RealApp"
     $r = Invoke-Cli @('new', '-App', $RealApp, '-Name', 'Smoke Test', '-ShortcutDir', $menu)
@@ -678,7 +859,7 @@ try {
     }
   }
 } finally {
-  Remove-Item Env:\TWINBAR_HOME, Env:\TWINBAR_PINNED_DIR, Env:\TWINBAR_STORE_DATA -ErrorAction SilentlyContinue
+  Remove-Item Env:\TWINBAR_HOME, Env:\TWINBAR_PINNED_DIR, Env:\TWINBAR_STORE_DATA, Env:\TWINBAR_SHORTCUT_DIR, Env:\TWINBAR_START_MENU -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
   if (-not $storeData.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
     Remove-Item -LiteralPath $storeData -Recurse -Force -ErrorAction SilentlyContinue

@@ -10,35 +10,54 @@ the same time. Microsoft Store apps such as Claude work too.
 
 ![The same app's icon in Twinbar's four styles: original, colour and badge, colour only, badge only](docs/styles.png)
 
-> **Status: early (0.3.0).** Phases 1 to 3 of 5 are done: the command line, an
-> own icon and taskbar button, and changing and repairing profiles, light/dark
-> and Store apps. A window to do it all without a terminal comes next. See
+> **Status: early (0.4.0).** Phases 1 to 4 of 5 are done: the command line, an
+> own icon and taskbar button, changing and repairing profiles, light/dark,
+> Store apps, and the Twinbar window. Releases and CI come next. See
 > [docs/phases.md](docs/phases.md).
 
 ## Requirements
 
 - Windows 10 or 11.
-- Nothing to install: Twinbar is one PowerShell script that runs with the
-  Windows PowerShell 5.1 and .NET Framework built into Windows. No admin rights
-  needed.
+- Nothing else: Twinbar is one PowerShell script that runs with the Windows
+  PowerShell 5.1 and .NET Framework built into Windows. No admin rights needed.
 - The app must be built on Electron (Slack, Discord, Postman, Bruno, VS Code,
-  Figma, Signal, MongoDB Compass, ...).
+  Cursor, Figma, Signal, MongoDB Compass, Claude, ...).
 
 ## Get it
 
 ```powershell
 git clone https://github.com/sadrazkh/twinbar.git
 cd twinbar
-.\twinbar.cmd help
+.\twinbar.cmd install -AddToPath
 ```
 
-Or download the repository as a zip and unpack it anywhere. `twinbar.cmd` runs
-`twinbar.ps1` whatever your PowerShell execution policy is.
+Or download the repository as a zip, unpack it anywhere and run
+`.\twinbar.cmd install` there. This puts **Twinbar** in the Start menu (in
+`%LOCALAPPDATA%\Programs\Twinbar`, for you only); `-AddToPath` also lets you
+type `twinbar` in any new terminal. `twinbar uninstall` takes it away again;
+your profiles stay and keep working.
 
-## Use it
+You can also use it without installing: `.\twinbar.cmd` runs `twinbar.ps1`
+whatever your PowerShell execution policy is, and `.\twinbar.cmd gui` opens the
+window.
+
+## Use the window
+
+Open **Twinbar** from the Start menu. **New profile...** lists the Electron apps
+it found (**Find...** for any other); pick one, give the profile a name, and
+choose its colour, badge, icon style and appearance while the preview shows the
+result. The list shows your profiles and whether each is running; select one to
+**Open**, **Edit**, **Remove** (it asks whether to delete the sign-in too) or
+**Repair** it (it asks where the app went if it moved). **Check all** runs the
+same checks as `twinbar doctor`.
+
+![The Twinbar window with two profiles](docs/window.png)
+
+## Use the command line
 
 Make a profile. `-App` takes the app's `.exe`, its install folder or its Start
-menu shortcut, or a Microsoft Store app's name:
+menu shortcut, or a Microsoft Store app's name (`twinbar apps` lists what it
+finds):
 
 ```powershell
 .\twinbar.cmd new -App "C:\Program Files\Bruno\Bruno.exe" -Name Work
@@ -86,6 +105,9 @@ digits, spaces, `.`, `_` and `-`.
 | `list [-Json]` | Show the profiles and whether each is running |
 | `open PROFILE` | Start a profile |
 | `remove PROFILE [-DeleteData]` | Remove a profile's shortcut and icon; with `-DeleteData`, its data too |
+| `apps [-Json]` | The Electron apps found in the Start menu and the Microsoft Store, with what to give `-App` |
+| `gui` | Open the Twinbar window |
+| `install [-Dir DIR] [-AddToPath]` / `uninstall` | Install Twinbar for you, or remove it (profiles stay) |
 | `help`, `version` | |
 
 A running profile isn't changed, rebuilt or removed; quit it first.
@@ -129,6 +151,7 @@ quits after it closes.
 | Normal installs | The app's own `.exe` is started. |
 | Squirrel installs (Slack, Discord, Postman...) | The launcher in the app's install folder is started; it always runs the newest version, so profiles keep working after the app updates. |
 | Microsoft Store apps (Claude...) | Started through Windows' package activation, with the profile's arguments. Their data is kept in `%USERPROFILE%\Twinbar\<app>\<name>\`: Windows redirects what a Store app writes under AppData into the app's own package, where Twinbar couldn't see or remove it. |
+| The Twinbar window | `Twinbar.exe` in the install folder, next to `twinbar.ps1`, compiled on your computer by `install`. It runs the script's window inside PowerShell without a console, with its own icon and taskbar button. |
 
 Twinbar never modifies the app. Removing moves files to the Recycle Bin, and a
 data folder is only ever removed if it carries that profile's marker.
@@ -137,7 +160,11 @@ data folder is only ever removed if it carries that profile's marker.
 
 - **Shared storage:** data an app keeps outside its data folder is shared
   between profiles, for example passwords some apps store in Windows
-  Credential Manager, or settings in the registry.
+  Credential Manager, or settings in the registry. Of the apps tested, Bruno,
+  Postman and Claude keep their sign-in in the data folder (encrypted with a
+  key that's in there too), so each profile signs in on its own. Claude also
+  refers to fixed folders (`%LOCALAPPDATA%\Claude-Data` and `Claude-3p`);
+  whatever it keeps there is shared with the original Claude.
 - **Appearance** only reaches apps that follow Windows' light or dark setting.
 - **Window icon:** it's set by the launcher, so if the launcher is stopped while
   the profile is open, the window shows a blank icon until the profile is
@@ -145,7 +172,9 @@ data folder is only ever removed if it carries that profile's marker.
 - **After updating Twinbar,** run `twinbar rebuild -All`; profiles made with
   0.1.0 get their icon and taskbar button that way, and the sign-in is kept.
 - Where policy blocks programs in your user folder (AppLocker and the like),
-  the launcher can't run.
+  the launcher and `Twinbar.exe` can't run.
+- The first start of a freshly built `Twinbar.exe` or launcher can take a few
+  seconds longer while Windows checks the new program.
 - Tested so far on Windows 11 with Bruno 4.3 (normal install), Postman 12.33
   (Squirrel install) and Claude 6.28 (Microsoft Store).
 
