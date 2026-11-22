@@ -12,7 +12,7 @@ Twinbar is built in phases. Each phase ends with working, tested code on
 | 5 | CI, signed releases, Scoop, docs | Done (0.5.0, the first release) |
 | 6 | Updates from inside Twinbar; finding the proxy on this computer | Done (0.7.0) |
 | 7 | An icon in the notification area, starting with Windows, and a jump list | Done (0.8.0) |
-| 8 | Storage and cache, advanced options, backup and restore | Next (0.9.0) |
+| 8 | Storage and cache, advanced options, backup and restore | Done (0.9.0) |
 
 ## Phase 1: core command line
 
@@ -238,9 +238,31 @@ Electron app, plus the real installed apps when run by hand.
 
 ## Phase 8: storage, advanced options, backup (0.9.0)
 
-Planned: each profile's size and a Clear cache that keeps the sign-in; extra
-command-line arguments and environment variables per profile; backing a profile
-up to a zip and restoring it.
+- `storage` sums each profile's data folder and its caches with a small C#
+  walker (`Files.Size`) that skips links (junctions) and what it can't read.
+  The caches are Chromium's own folders, at the top and in each session
+  partition: `Cache`, `Code Cache`, `GPUCache`, the Dawn and shader caches,
+  `Service Worker\CacheStorage` and `ScriptCache`, `Crashpad\reports`.
+  `clean` deletes just those, only in a data folder with the profile's marker
+  and only while the profile isn't running.
+- `-AppArgs` and `-Environment` are kept in the record (`userArgs`,
+  `userEnv`). The arguments go after Twinbar's own switches, and
+  `--user-data-dir` is refused; the launcher sets the variables when it starts
+  a normal or Squirrel app. Store apps start through Windows' package
+  activation, which takes no environment.
+- `backup` writes a zip: `twinbar-backup.json` (format 1: the record, the
+  Twinbar version, the time, and a hash of the Windows account and computer)
+  and `data/` (the data folder without caches, lock files and the marker).
+  `restore` unpacks it into a new data folder, checking that every path stays
+  inside it, then makes the profile as `new -AdoptDataDir` would, with the
+  backup's look, proxy and options; if anything fails, the unpacked folder
+  goes again. A backup from another account says the sign-in will likely need
+  doing again: Chromium encrypts cookies with a key that DPAPI ties to the
+  Windows account.
+- The window: right-click a profile for Open, Edit, Check IP, Clear cache,
+  Back up, Repair, Remove; More... has Storage of the profiles and Restore a
+  backup (which picks the next free name, "Work 2", while the original is
+  still there); the New/Edit window has Arguments and Environment.
 
 ## Not planned
 

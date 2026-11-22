@@ -31,8 +31,13 @@ Only the latest release gets fixes.
   its launcher. It doesn't inject code into apps, patch them or re-sign them.
 - It writes only to its own folders (`%APPDATA%\Twinbar`, the profiles' data
   folders, `%USERPROFILE%\Twinbar` for Store apps, its install folder), its
-  own Start menu shortcuts, taskbar pins of its own profiles, and, only with
-  `install -AddToPath`, your user PATH.
+  own Start menu shortcuts, taskbar pins of its own profiles, its jump list,
+  backups where you ask (`Documents\Twinbar backups` by default), and, only
+  when you turn them on, your user PATH (`install -AddToPath`) and a
+  `Twinbar` entry under your user's `Run` key (start with Windows).
+- A backup holds a profile's sign-in (its cookies and tokens, still encrypted
+  for your Windows account): treat the zip like a password. Restoring checks
+  that every file lands inside the new profile's data folder.
 - It compiles its launcher and `Twinbar.exe` on your computer from the C#
   source inside `twinbar.ps1`, so you can read exactly what runs.
 - Release files come with `SHA256SUMS` and signed build provenance from this

@@ -154,6 +154,9 @@ digits, spaces, `.`, `_` and `-`.
 | `list [-Json]` | Show the profiles and whether each is running |
 | `open PROFILE` | Start a profile |
 | `remove PROFILE [-DeleteData]` | Remove a profile's shortcut and icon; with `-DeleteData`, its data too |
+| `storage [PROFILE] [-Json]` | How much each profile's data takes, and how much of that is cache |
+| `clean PROFILE` | Clear a profile's cache; its sign-in and data stay |
+| `backup PROFILE [-File FILE]` / `restore FILE [-Name NAME]` | Back a profile up to a zip, and make it again from one (see [Storage, cache and backups](#storage-cache-and-backups)) |
 | `apps [-Json]` | The Electron apps found in the Start menu and the Microsoft Store, with what to give `-App` |
 | `gui [-Tray]` | Open the Twinbar window (with `-Tray`, just its icon by the clock) |
 | `settings [NAME on\|off]` | Show or change Twinbar's settings: `updates` (check once a day), `tray` (closing the window keeps the icon by the clock), `startup` (start with Windows) |
@@ -171,6 +174,8 @@ Options for `new` (and, except the last three, `change`):
 | `-Style S` | `tint+badge` (default), `tint` (colour only), `badge` (original colours and a badge) or `original` (the app's own icon) |
 | `-Appearance A` | `system` (default), `light` or `dark`. Works for apps that follow Windows' light or dark setting; apps with their own theme setting keep it per profile anyway. |
 | `-Proxy P` | `socks5://host:port`, `http://host:port` or `https://host:port`: the profile's traffic goes through it, and if it's down the profile is offline rather than going around it (see [Proxy and kill switch](#proxy-and-kill-switch)). `-Proxy none` with `change` removes it. |
+| `-AppArgs "..."` | Extra command-line switches for the app, after Twinbar's own, like `--disable-gpu`. `none` removes them. |
+| `-Environment "N=v;N2=v"` | Environment variables for the app, `NAME=value` separated by `;`. Not for Microsoft Store apps (Windows starts those itself). `none` removes them. |
 | `-DataDir DIR` | Keep the profile's data in another folder |
 | `-AdoptDataDir` | Use a data folder that already has data in it |
 | `-ShortcutDir DIR` | Put the shortcut somewhere other than the Start menu |
@@ -234,6 +239,38 @@ Stopping that last kind of traffic needs a firewall rule, which needs admin
 rights and applies to the app's program file, so it would cut off the
 original app too; for that, use your VPN client's own kill switch.
 `tests\smoke.ps1 -RealApp <app> -Launch` measures any app the same way.
+
+## Storage, cache and backups
+
+See how much each profile takes, and how much of it is cache:
+
+```powershell
+.\twinbar.cmd storage
+.\twinbar.cmd clean "Slack Work"     # clear its cache; the sign-in stays
+```
+
+Clearing the cache deletes only Chromium's caches in the profile's data folder
+(and in its session partitions): `Cache`, `Code Cache`, the GPU and shader
+caches, service worker caches and crash reports. The sign-in, settings and
+local data stay, and the app fills the cache again as it needs it.
+
+Back a profile up to a zip (its settings and data folder, without caches), and
+make it again from that zip later or on another computer:
+
+```powershell
+.\twinbar.cmd backup "Slack Work"                       # into Documents\Twinbar backups
+.\twinbar.cmd backup "Slack Work" -File D:\slack-work.zip
+.\twinbar.cmd restore D:\slack-work.zip                 # as it was
+.\twinbar.cmd restore D:\slack-work.zip -Name "Work 2"  # next to the original
+```
+
+A backup holds the profile's sign-in, so keep it as safe as a password. Apps
+encrypt their sign-in with your Windows account, so on another computer or
+Windows account the restored profile has its data and settings but usually
+asks you to sign in again; Twinbar says so when that's the case.
+
+In the window, right-click a profile for **Clear cache...** and **Back up...**;
+**More...** has **Storage of the profiles** and **Restore a backup...**.
 
 ## How it works
 

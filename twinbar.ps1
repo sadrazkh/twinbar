@@ -4,10 +4,16 @@ Twinbar: a second, separately signed-in copy of an Electron app on Windows.
 
 .DESCRIPTION
   twinbar new -App APP -Name NAME [-Color C] [-Badge B] [-Style S] [-Appearance A]
-              [-Proxy P] [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
+              [-Proxy P] [-AppArgs "..."] [-Environment "N=v;..."]
+              [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
   twinbar change PROFILE [-Color C] [-Badge B] [-Style S] [-Appearance A] [-Proxy P]
+                 [-AppArgs "..."] [-Environment "N=v;..."]
   twinbar ip [PROFILE] [-Json]
   twinbar proxies [-Json]
+  twinbar storage [PROFILE] [-Json]
+  twinbar clean PROFILE
+  twinbar backup PROFILE [-File FILE.zip]
+  twinbar restore FILE.zip [-Name NAME] [-App APP]
   twinbar rebuild PROFILE [-App APP] | twinbar rebuild -All
   twinbar doctor [PROFILE]
   twinbar list [-Json]
@@ -41,7 +47,10 @@ param(
   [string] $Style,
   [string] $Appearance,
   [string] $Proxy,
+  [string] $AppArgs,
+  [string] $Environment,
   [string] $DataDir,
+  [string] $File,
   [switch] $AdoptDataDir,
   [string] $ShortcutDir,
   [switch] $DeleteData,
@@ -56,7 +65,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.8.0'
+$script:TwinbarVersion = '0.9.0'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
@@ -77,7 +86,7 @@ $script:Appearances = [ordered]@{
 # Every field of a profile record, in the order they're written.
 $script:RecordFields = @(
   'schema', 'id', 'name', 'appName', 'appId', 'appKind', 'launchExe', 'realExe', 'packageApp',
-  'dataDir', 'shortcut', 'aumid', 'launcher', 'style', 'color', 'badge', 'appearance', 'proxy', 'extraArgs',
+  'dataDir', 'shortcut', 'aumid', 'launcher', 'style', 'color', 'badge', 'appearance', 'proxy', 'userArgs', 'userEnv', 'extraArgs',
   'icon', 'created', 'updated', 'twinbarVersion'
 )
 
@@ -396,6 +405,61 @@ namespace TwinbarInterop {
     public static void Delete(string appId) {
       ICustomDestinationList list = (ICustomDestinationList)new DestinationList();
       try { list.DeleteList(appId); } finally { Marshal.ReleaseComObject(list); }
+    }
+  }
+
+  // Sizes and file lists of a profile's data folder. Links inside it (junctions)
+  // aren't followed, and what can't be read is skipped.
+  public static class Files {
+    public static long Size(string path) {
+      long total = 0;
+      DirectoryInfo root = new DirectoryInfo(path);
+      if (!root.Exists) return 0;
+      Stack<DirectoryInfo> pending = new Stack<DirectoryInfo>();
+      pending.Push(root);
+      while (pending.Count > 0) {
+        DirectoryInfo dir = pending.Pop();
+        try {
+          foreach (FileSystemInfo entry in dir.EnumerateFileSystemInfos()) {
+            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+            DirectoryInfo sub = entry as DirectoryInfo;
+            if (sub != null) pending.Push(sub); else total += ((FileInfo)entry).Length;
+          }
+        } catch (UnauthorizedAccessException) {
+        } catch (IOException) {
+        }
+      }
+      return total;
+    }
+
+    // The files under root, relative to it, without the folders in skip (relative
+    // to root too, any case).
+    public static string[] List(string root, string[] skip) {
+      List<string> found = new List<string>();
+      Dictionary<string, bool> skipped = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+      foreach (string s in skip) skipped[s.TrimEnd('\\')] = true;
+      string top = Path.GetFullPath(root).TrimEnd('\\');
+      Stack<string> pending = new Stack<string>();
+      pending.Push("");
+      while (pending.Count > 0) {
+        string rel = pending.Pop();
+        DirectoryInfo dir = new DirectoryInfo(rel.Length == 0 ? top : Path.Combine(top, rel));
+        try {
+          foreach (FileSystemInfo entry in dir.EnumerateFileSystemInfos()) {
+            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+            string child = rel.Length == 0 ? entry.Name : rel + "\\" + entry.Name;
+            if (entry is DirectoryInfo) {
+              if (!skipped.ContainsKey(child)) pending.Push(child);
+            } else {
+              found.Add(child);
+            }
+          }
+        } catch (UnauthorizedAccessException) {
+        } catch (IOException) {
+        }
+      }
+      found.Sort(StringComparer.OrdinalIgnoreCase);
+      return found.ToArray();
     }
   }
 
@@ -1028,7 +1092,7 @@ namespace TwinbarLauncher {
     const uint WmGetIcon = 0x7F, WmSetIcon = 0x80, AbortIfHung = 2;
 
     static string logPath, profileId, appId, displayName, relaunchCommand, iconResource, iconFile;
-    static string launchExe, appKind, packageApp, exeBaseName, extraArgs, dataDir, proxy;
+    static string launchExe, appKind, packageApp, exeBaseName, extraArgs, dataDir, proxy, userEnv;
     static readonly Dictionary<int, IntPtr> iconsBySize = new Dictionary<int, IntPtr>();
     static Regex dataDirArgument;
     static IntPtr mainProcess = IntPtr.Zero, hook = IntPtr.Zero;
@@ -1072,6 +1136,7 @@ namespace TwinbarLauncher {
       packageApp = Text(record, "packageApp");
       extraArgs = Text(record, "extraArgs");
       proxy = Text(record, "proxy");
+      userEnv = Text(record, "userEnv");
       exeBaseName = Path.GetFileNameWithoutExtension(Text(record, "realExe"));
       displayName = Text(record, "appName") + " " + Text(record, "name");
       iconFile = Text(record, "icon");
@@ -1130,6 +1195,11 @@ namespace TwinbarLauncher {
         }
         info.EnvironmentVariables["ALL_PROXY"] = proxy;
         info.EnvironmentVariables["NO_PROXY"] = "localhost,127.0.0.1,::1";
+      }
+      // The profile's own environment variables: NAME=value;NAME2=value.
+      foreach (string pair in userEnv.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries)) {
+        int equals = pair.IndexOf('=');
+        if (equals > 0) info.EnvironmentVariables[pair.Substring(0, equals)] = pair.Substring(equals + 1);
       }
       using (Process.Start(info)) { }
     }
@@ -2138,9 +2208,34 @@ function Get-ProxyNotes([string] $ProxyValue) {
   if ($ProxyValue -like 'socks5://*') { return $script:SocksTip }
 }
 
-function Get-ExtraArgs([string] $AppearanceValue, [string] $ProxyValue, [string] $AppKind) {
+# Twinbar's own switches (appearance, proxy), then the profile's extra arguments.
+function Get-ExtraArgs([string] $AppearanceValue, [string] $ProxyValue, [string] $AppKind, [string] $UserArgs = '') {
   $proxyArgs = Get-ProxyArgs $ProxyValue -NoDnsRule:($AppKind -eq 'store')
-  return (@($script:Appearances[$AppearanceValue], $proxyArgs) | Where-Object { $_ }) -join ' '
+  return (@($script:Appearances[$AppearanceValue], $proxyArgs, $UserArgs) | Where-Object { $_ }) -join ' '
+}
+
+# A profile's extra command-line arguments for the app: one line, quotes that
+# close, and never its own --user-data-dir. "none" (or empty) for none.
+function Resolve-AppArgs([string] $Value) {
+  if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Trim() -eq 'none') { return '' }
+  $v = $Value.Trim()
+  if ($v -match "[`r`n]") { Stop-Twinbar 'the extra arguments must be on one line' }
+  if ($v.Length -gt 1000) { Stop-Twinbar 'the extra arguments must be at most 1000 characters' }
+  if ($v -match '(?i)--user-data-dir') { Stop-Twinbar "the extra arguments can't set --user-data-dir: the profile's data folder is Twinbar's to set" }
+  if (([regex]::Matches($v, '"')).Count % 2) { Stop-Twinbar 'the extra arguments have a quote that is never closed' }
+  return $v
+}
+
+# Environment variables for a profile: NAME=value, separated by ';' (or new
+# lines). Returns NAME=value;NAME2=value, or "" for "none".
+function Resolve-EnvValue([string] $Value) {
+  if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Trim() -eq 'none') { return '' }
+  $pairs = foreach ($part in @($Value -split "[;`r`n]" | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    $m = [regex]::Match($part, '^([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$')
+    if (-not $m.Success) { Stop-Twinbar "environment variables look like NAME=value, separated by ';' ('$part' doesn't)" }
+    '{0}={1}' -f $m.Groups[1].Value, $m.Groups[2].Value.Trim()
+  }
+  return (@($pairs) -join ';')
 }
 
 function Resolve-Appearance([string] $Value) {
@@ -2469,7 +2564,7 @@ function Publish-Profile([System.Collections.IDictionary] $Record) {
     }
   }
   $Record.launcher = Initialize-Launcher
-  $Record.extraArgs = Get-ExtraArgs $Record.appearance $Record.proxy $Record.appKind
+  $Record.extraArgs = Get-ExtraArgs $Record.appearance $Record.proxy $Record.appKind $Record.userArgs
   $oldIcon = $Record.icon
   # Store apps move with every update, so even their original icon gets a copy.
   if ($Record.style -ne 'original' -or $Record.appKind -eq 'store') {
@@ -2513,7 +2608,17 @@ function Get-LookNote($Record) {
   }
   if ($Record.appearance -and $Record.appearance -ne 'system') { $look += "; always $($Record.appearance)" }
   if ($Record.proxy) { $look += "; via $($Record.proxy)" }
+  if ((Get-RecordValue $Record 'userArgs')) { $look += "; with $($Record.userArgs)" }
+  $vars = @((Get-RecordValue $Record 'userEnv') -split ';' | Where-Object { $_ }).Count
+  if ($vars) { $look += "; $vars environment variable(s)" }
   return $look
+}
+
+# Windows starts Store apps itself (package activation), which takes no environment.
+function Get-EnvNotes($Record) {
+  if ($Record.appKind -eq 'store' -and $Record.userEnv) {
+    "Note: Windows doesn't let Store apps be given environment variables, so only the extra arguments apply to $($Record.appName)."
+  }
 }
 
 function Find-Profile([string] $Which) {
@@ -2560,7 +2665,8 @@ function Get-ProfileStatus($Record) {
 function Invoke-New {
   param(
     [string] $AppPath, [string] $ProfileName, [string] $DataFolder, [switch] $Adopt, [string] $MenuDir,
-    [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName, [string] $ProxyValue
+    [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName, [string] $ProxyValue,
+    [string] $AppArgsValue, [string] $EnvValue
   )
 
   $label = Test-ProfileName $ProfileName
@@ -2568,6 +2674,8 @@ function Invoke-New {
   $badgeValue = Get-BadgeText $BadgeText $label
   $appearanceValue = Resolve-Appearance $AppearanceName
   $proxyChoice = Resolve-ProxyValue $ProxyValue
+  $argsChoice = Resolve-AppArgs $AppArgsValue
+  $envChoice = Resolve-EnvValue $EnvValue
   $app = Resolve-ElectronApp $AppPath
   $key = Get-NameKey $label
   $id = "$($app.Id).$key"
@@ -2636,6 +2744,8 @@ function Invoke-New {
   $record.badge = $badgeValue
   $record.appearance = $appearanceValue
   $record.proxy = $proxyChoice
+  $record.userArgs = $argsChoice
+  $record.userEnv = $envChoice
   $record.created = (Get-Date).ToString('o')
 
   $createdDir = -not (Test-Path -LiteralPath $dd)
@@ -2665,6 +2775,7 @@ function Invoke-New {
   "  Sign-in data: $dd ($dataNote)"
   "Open it from the Start menu, or run: twinbar open ""$fullName"""
   Get-ProxyNotes $record.proxy
+  Get-EnvNotes $record
 }
 
 # After a data folder went: its now-empty <app> folder, and the Store data root
@@ -2691,9 +2802,12 @@ function Assert-NotRunning($Record) {
 }
 
 function Invoke-Change {
-  param([string] $Which, [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName, [string] $ProxyValue)
-  if (-not ($ColorName -or $BadgeText -or $StyleName -or $AppearanceName -or $ProxyValue)) {
-    Stop-Twinbar 'nothing to change; give -Color, -Badge, -Style, -Appearance or -Proxy'
+  param(
+    [string] $Which, [string] $ColorName, [string] $BadgeText, [string] $StyleName, [string] $AppearanceName, [string] $ProxyValue,
+    [string] $AppArgsValue, [string] $EnvValue
+  )
+  if (-not ($ColorName -or $BadgeText -or $StyleName -or $AppearanceName -or $ProxyValue -or $AppArgsValue -or $EnvValue)) {
+    Stop-Twinbar 'nothing to change; give -Color, -Badge, -Style, -Appearance, -Proxy, -AppArgs or -Environment'
   }
   $p = Find-Profile $Which
   Assert-NotRunning $p
@@ -2703,9 +2817,12 @@ function Invoke-Change {
   if ($BadgeText) { $record.badge = Get-BadgeText $BadgeText $record.name }
   if ($AppearanceName) { $record.appearance = Resolve-Appearance $AppearanceName }
   if ($ProxyValue) { $record.proxy = Resolve-ProxyValue $ProxyValue }
+  if ($AppArgsValue) { $record.userArgs = Resolve-AppArgs $AppArgsValue }
+  if ($EnvValue) { $record.userEnv = Resolve-EnvValue $EnvValue }
   $pins = Publish-Profile $record
   "Changed ""$($record.appName) $($record.name)"": $(Get-LookNote $record)."
   if ($ProxyValue) { Get-ProxyNotes $record.proxy }
+  if ($EnvValue) { Get-EnvNotes $record }
   if ($pins) { "  Updated $pins taskbar pin(s)." }
 }
 
@@ -3093,6 +3210,204 @@ function Invoke-Remove([string] $Which, [switch] $WithData) {
 }
 
 # ---------------------------------------------------------------------------
+# Storage and cache, and backups
+# ---------------------------------------------------------------------------
+
+# Folders in an Electron app's data that only hold caches: deleting them keeps
+# the sign-in, settings and local data, and the app fills them again.
+$script:CacheFolders = @(
+  'Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'DawnGraphiteCache', 'DawnWebGPUCache', 'GrShaderCache',
+  'ShaderCache', 'Service Worker\CacheStorage', 'Service Worker\ScriptCache', 'Crashpad\reports'
+)
+
+# The cache folders in a data folder and in its session partitions, relative to it.
+function Get-CacheFolders([string] $DataDir) {
+  $bases = @('') + @(Get-ChildItem -LiteralPath (Join-Path $DataDir 'Partitions') -Directory -Force -ErrorAction SilentlyContinue |
+      ForEach-Object { "Partitions\$($_.Name)" })
+  foreach ($b in $bases) {
+    foreach ($c in $script:CacheFolders) {
+      $rel = if ($b) { "$b\$c" } else { $c }
+      if (Test-Path -LiteralPath (Join-Path $DataDir $rel) -PathType Container) { $rel }
+    }
+  }
+}
+
+function Format-Size([long] $Bytes) {
+  if ($Bytes -ge 1GB) { return '{0:0.0} GB' -f ($Bytes / 1GB) }
+  if ($Bytes -ge 1MB) { return '{0:0} MB' -f ($Bytes / 1MB) }
+  if ($Bytes -ge 1KB) { return '{0:0} KB' -f ($Bytes / 1KB) }
+  return "$Bytes bytes"
+}
+
+function Get-ProfileStorage($Record) {
+  Initialize-Interop
+  $caches = @(Get-CacheFolders $Record.dataDir)
+  $cache = [long]0
+  foreach ($c in $caches) { $cache += [TwinbarInterop.Files]::Size((Join-Path $Record.dataDir $c)) }
+  return [pscustomobject]@{ Total = [TwinbarInterop.Files]::Size($Record.dataDir); Cache = $cache; CacheFolders = $caches }
+}
+
+function Invoke-Storage([string] $Which, [switch] $AsJson) {
+  $profiles = @(if ($Which) { Find-Profile $Which } else { Get-AllProfiles })
+  $rows = @(foreach ($p in $profiles) {
+      $s = Get-ProfileStorage $p
+      [pscustomobject]@{ id = $p.id; fullName = ('{0} {1}' -f $p.appName, $p.name); dataDir = $p.dataDir; total = $s.Total; cache = $s.Cache }
+    })
+  if ($AsJson) { return (ConvertTo-Json -InputObject $rows -Depth 3) }
+  if (-not $rows.Count) { return 'No profiles yet.' }
+  $w = [Math]::Max(7, ($rows | ForEach-Object { $_.fullName.Length } | Measure-Object -Maximum).Maximum)
+  ('{0}  {1}  {2}  {3}' -f 'Profile'.PadRight($w), 'Size'.PadLeft(9), 'Cache'.PadLeft(9), 'Data folder')
+  foreach ($r in $rows) {
+    ('{0}  {1}  {2}  {3}' -f $r.fullName.PadRight($w), (Format-Size $r.total).PadLeft(9), (Format-Size $r.cache).PadLeft(9), $r.dataDir)
+  }
+  "Clearing a profile's cache keeps its sign-in and data: twinbar clean PROFILE"
+}
+
+function Invoke-Clean([string] $Which) {
+  $p = Find-Profile $Which
+  Assert-NotRunning $p
+  if ((Get-DataDirState $p.dataDir $p.id) -ne 'ours') { Stop-Twinbar "$($p.dataDir) doesn't carry this profile's Twinbar marker, so Twinbar leaves it alone" }
+  $before = Get-ProfileStorage $p
+  $left = 0
+  foreach ($c in $before.CacheFolders) {
+    try { Remove-Item -LiteralPath (Join-Path $p.dataDir $c) -Recurse -Force -ErrorAction Stop } catch { $left++ }
+  }
+  "Cleared $(Format-Size $before.Cache) of cache from $($p.appName) $($p.name); its sign-in, settings and data are kept."
+  if ($left) { Write-Warning "$left cache folder(s) couldn't be removed completely" }
+}
+
+# Backups: a zip with twinbar-backup.json (the profile's settings) and data/ (its
+# data folder, without caches, lock files and Twinbar's marker).
+$script:BackupSkipFiles = @('SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile', $script:MarkerName)
+
+function Get-DefaultBackupDir {
+  if ($env:TWINBAR_BACKUP_DIR) { return $env:TWINBAR_BACKUP_DIR }
+  return (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Twinbar backups')
+}
+
+# Tells whether a backup was made by this Windows account on this computer (apps
+# tie sign-ins to them), without putting the account's id in the file.
+function Get-UserMark {
+  $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes("twinbar|$sid|$env:COMPUTERNAME")) } finally { $sha.Dispose() }
+  return (($bytes[0..7] | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+
+function Invoke-Backup([string] $Which, [string] $FilePath) {
+  $p = ConvertTo-ProfileTable (Find-Profile $Which)
+  $fullName = '{0} {1}' -f $p.appName, $p.name
+  Assert-NotRunning $p
+  if (-not (Test-Path -LiteralPath $p.dataDir -PathType Container)) { Stop-Twinbar "$fullName has no data to back up yet ($($p.dataDir))" }
+  $target = if ($FilePath) { Resolve-FullPath $FilePath } else { Join-Path (Get-DefaultBackupDir) ('{0}-{1}.zip' -f $p.id, (Get-Date -Format 'yyyyMMdd-HHmmss')) }
+  if ($target -notmatch '(?i)\.zip$') { $target += '.zip' }
+  if (Test-Path -LiteralPath $target) { Stop-Twinbar "$target is already there; pick another file name" }
+  if ($target.StartsWith($p.dataDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { Stop-Twinbar "the backup can't go inside the profile's own data folder" }
+  Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+  Initialize-Interop
+  $files = @([TwinbarInterop.Files]::List($p.dataDir, [string[]]@(Get-CacheFolders $p.dataDir)) |
+      Where-Object { $script:BackupSkipFiles -notcontains (Split-Path -Leaf $_) })
+  [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
+  $partial = "$target.part"
+  $skipped = 0
+  $zip = [IO.Compression.ZipFile]::Open($partial, [IO.Compression.ZipArchiveMode]::Create)
+  try {
+    $manifest = [ordered]@{ format = 1; twinbarVersion = $script:TwinbarVersion; created = (Get-Date).ToString('o'); user = (Get-UserMark); profile = $p }
+    $writer = New-Object IO.StreamWriter($zip.CreateEntry('twinbar-backup.json').Open(), $script:Utf8NoBom)
+    try { $writer.Write(($manifest | ConvertTo-Json -Depth 5)) } finally { $writer.Dispose() }
+    foreach ($f in $files) {
+      try {
+        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Join-Path $p.dataDir $f), ('data/' + $f.Replace('\', '/')), [IO.Compression.CompressionLevel]::Optimal)
+      } catch {
+        $skipped++
+      }
+    }
+  } catch {
+    $zip.Dispose()
+    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+    throw
+  }
+  $zip.Dispose()
+  Move-Item -LiteralPath $partial -Destination $target
+  "Backed up ""$fullName"" to $target ($(Format-Size (Get-Item -LiteralPath $target).Length), $($files.Count - $skipped) files; caches left out)."
+  if ($skipped) { Write-Warning "$skipped file(s) couldn't be read and were left out" }
+  "It holds the profile's sign-in: keep it as safe as a password. Bring it back with: twinbar restore ""$target"""
+}
+
+# What a backup says about itself (twinbar-backup.json).
+function Read-BackupManifest([string] $FilePath) {
+  Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+  try {
+    $zip = [IO.Compression.ZipFile]::OpenRead($FilePath)
+  } catch {
+    Stop-Twinbar "$FilePath isn't a Twinbar backup (it can't be read as a zip)"
+  }
+  try {
+    $entry = $zip.GetEntry('twinbar-backup.json')
+    if ($null -eq $entry) { Stop-Twinbar "$FilePath isn't a Twinbar backup" }
+    $reader = New-Object IO.StreamReader($entry.Open(), [Text.Encoding]::UTF8)
+    try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+  } finally {
+    $zip.Dispose()
+  }
+  if (-not $manifest.PSObject.Properties['profile'] -or -not $manifest.profile) { Stop-Twinbar "$FilePath isn't a Twinbar backup" }
+  return $manifest
+}
+
+# Makes a profile again from a backup: its data first, into a new data folder,
+# every file checked to land inside it; then the profile around that data, as
+# new -AdoptDataDir would, with the backup's look, proxy and options.
+function Invoke-Restore([string] $FilePath, [string] $NewName, [string] $AppPath) {
+  if ([string]::IsNullOrWhiteSpace($FilePath)) { Stop-Twinbar 'which backup? twinbar restore <file.zip>' }
+  $source = Resolve-FullPath $FilePath
+  if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { Stop-Twinbar "there's no file $source" }
+  $manifest = Read-BackupManifest $source
+  $old = $manifest.profile
+  $label = Test-ProfileName $(if ($NewName) { $NewName } else { Get-RecordValue $old 'name' })
+  $appSource = if ($AppPath) { $AppPath } elseif ((Get-RecordValue $old 'appKind') -eq 'store' -and (Get-RecordValue $old 'packageApp')) { Get-RecordValue $old 'packageApp' } else { Get-RecordValue $old 'launchExe' }
+  try { $app = Resolve-ElectronApp $appSource } catch { Stop-Twinbar "$(Get-RecordValue $old 'appName') isn't at $appSource on this computer; give its place with -App" }
+  if ($app.Id -ne (Get-RecordValue $old 'appId')) { Stop-Twinbar "that's another app ($($app.Name)); this backup is of $(Get-RecordValue $old 'appName')" }
+  $key = Get-NameKey $label
+  $id = "$($app.Id).$key"
+  if (Test-Path -LiteralPath (Get-RecordPath $id)) { Stop-Twinbar "there's already a profile '$id'; give the restored one another name with -Name" }
+  $dataRoot = if ($app.Kind -eq 'store') { Join-Path (Get-StoreDataRoot) $app.Id } else { Join-Path (Join-Path (Get-TwinbarHome) 'data') $app.Id }
+  $dd = Join-Path $dataRoot $key
+  if ((Get-DataDirState $dd $id) -notin 'missing', 'empty') { Stop-Twinbar "$dd already has files in it; move them away, or restore under another -Name" }
+
+  Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+  [void][IO.Directory]::CreateDirectory($dd)
+  try {
+    $zip = [IO.Compression.ZipFile]::OpenRead($source)
+    try {
+      $root = [IO.Path]::GetFullPath($dd).TrimEnd('\') + '\'
+      foreach ($e in @($zip.Entries)) {
+        if (-not $e.FullName.StartsWith('data/', [StringComparison]::Ordinal) -or $e.FullName.EndsWith('/')) { continue }
+        $target = [IO.Path]::GetFullPath((Join-Path $dd ($e.FullName.Substring(5).Replace('/', '\'))))
+        if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+          Stop-Twinbar "$source has a file that would land outside the profile's data folder ($($e.FullName)), so nothing was restored"
+        }
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $target, $false)
+      }
+    } finally {
+      $zip.Dispose()
+    }
+    $badge = if ($NewName) { '' } else { Get-RecordValue $old 'badge' }
+    Invoke-New -AppPath $appSource -ProfileName $label -DataFolder $dd -Adopt -ColorName (Get-RecordValue $old 'color') -BadgeText $badge `
+      -StyleName (Get-RecordValue $old 'style') -AppearanceName (Get-RecordValue $old 'appearance') -ProxyValue (Get-RecordValue $old 'proxy') `
+      -AppArgsValue (Get-RecordValue $old 'userArgs') -EnvValue (Get-RecordValue $old 'userEnv')
+  } catch {
+    # Only what this restore unpacked goes again.
+    Remove-Item -LiteralPath $dd -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+  }
+  "Restored from $source."
+  if ((Get-RecordValue $manifest 'user') -ne (Get-UserMark)) {
+    "Note: this backup comes from another Windows account or computer. Apps tie their sign-in to the Windows account, so you'll probably have to sign in again; the rest is there."
+  }
+}
+
+# ---------------------------------------------------------------------------
 # The Twinbar window: the same commands without a terminal. WinForms, built in
 # code; every button calls the same Invoke-* function as the command line.
 # Event handlers reach their state through $script:Gui and $script:Dialog
@@ -3297,6 +3612,15 @@ function New-MainForm {
 
   $list.Add_SelectedIndexChanged({ Update-GuiButtons })
   $list.Add_DoubleClick({ Open-SelectedProfile })
+  $list.Add_MouseUp({
+      param($control, $mouse)
+      if ($mouse.Button -ne 'Right') { return }
+      $hit = $control.HitTest($mouse.Location)
+      if ($hit.Item) {
+        $hit.Item.Selected = $true
+        (New-ProfileMenu).Show($control, $mouse.Location)
+      }
+    })
   $list.Add_KeyDown({
       param($control, $key)
       if ($key.KeyCode -eq 'Return') { Open-SelectedProfile }
@@ -3728,6 +4052,11 @@ function Show-MoreMenu {
   [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
   $proxies = $menu.Items.Add('Find proxies on this computer')
   $proxies.Add_Click({ Show-ProxiesFound })
+  $storage = $menu.Items.Add('Storage of the profiles')
+  $storage.Add_Click({ Show-StorageDialog })
+  $restore = $menu.Items.Add('Restore a backup...')
+  $restore.Add_Click({ Restore-Backup '' })
+  [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
   $about = $menu.Items.Add('About Twinbar')
   $about.Add_Click({
       [void](Show-GuiMessage $script:Gui.Form ("Twinbar $($script:TwinbarVersion)`r`n`r`nSecond, separately signed-in copies of your Electron apps.`r`n" +
@@ -3752,6 +4081,125 @@ function Show-ProxiesFound {
     Set-GuiStatus ''
   }
   Show-TextDialog 'Proxies on this computer' ($lines -join "`r`n")
+}
+
+# Right-click on a profile in the list: everything that can be done with it.
+function New-ProfileMenu {
+  $menu = New-Object Windows.Forms.ContextMenuStrip
+  $menu.Font = New-GuiFont
+  $actions = [ordered]@{
+    'Open'           = { Open-SelectedProfile }
+    'Edit...'        = { $r = Get-SelectedRow; if ($r) { Show-ProfileDialog $r } }
+    'Check IP'       = { Show-IpCheck }
+    '-1'             = $null
+    'Clear cache...' = { Clear-SelectedCache }
+    'Back up...'     = { Backup-SelectedProfile }
+    '-2'             = $null
+    'Repair'         = { Repair-SelectedProfile }
+    'Remove...'      = { $r = Get-SelectedRow; if ($r) { Show-RemoveDialog $r } }
+  }
+  foreach ($text in $actions.Keys) {
+    if ($text -like '-*') { [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator)); continue }
+    $item = $menu.Items.Add($text)
+    $item.Add_Click($actions[$text])
+  }
+  return $menu
+}
+
+function Show-StorageDialog {
+  $form = $script:Gui.Form
+  $lines = New-Object System.Collections.Generic.List[string]
+  $form.UseWaitCursor = $true
+  Set-GuiStatus 'Measuring the profiles...'
+  [Windows.Forms.Application]::DoEvents()
+  try {
+    Invoke-Storage '' | ForEach-Object { $lines.Add([string]$_) }
+  } catch {
+    $lines.Add((ConvertTo-Sentence $_.Exception.Message))
+  } finally {
+    $form.UseWaitCursor = $false
+    Set-GuiStatus ''
+  }
+  [void]$lines.Add('')
+  [void]$lines.Add('Right-click a profile in the list for Clear cache... and Back up...')
+  Show-TextDialog 'Storage of the profiles' ($lines -join "`r`n")
+}
+
+function Clear-SelectedCache {
+  $row = Get-SelectedRow
+  if (-not $row) { return }
+  $form = $script:Gui.Form
+  $form.UseWaitCursor = $true
+  [Windows.Forms.Application]::DoEvents()
+  try { $s = Get-ProfileStorage $row.Record } finally { $form.UseWaitCursor = $false }
+  if ($s.Cache -eq 0) {
+    [void](Show-GuiMessage $form "$($row.FullName) has no cache to clear." 'OK' 'Information')
+    return
+  }
+  $answer = Show-GuiMessage $form ("Clear $(Format-Size $s.Cache) of cache from $($row.FullName) ($(Format-Size $s.Total) in all)? " +
+    'Its sign-in, settings and data stay; the app fills the cache again as it needs it.') 'YesNo' 'Question'
+  if ($answer -eq 'Yes') { [void](Invoke-GuiAction { Invoke-Clean $row.Id }) }
+}
+
+function Backup-SelectedProfile {
+  $row = Get-SelectedRow
+  if (-not $row) { return }
+  $dialog = New-Object Windows.Forms.SaveFileDialog
+  $dialog.Title = "Back up $($row.FullName)"
+  $dialog.Filter = 'Twinbar backups (*.zip)|*.zip'
+  $dir = Get-DefaultBackupDir
+  [void][IO.Directory]::CreateDirectory($dir)
+  $dialog.InitialDirectory = $dir
+  $dialog.FileName = '{0}-{1}.zip' -f $row.Id, (Get-Date -Format 'yyyyMMdd-HHmmss')
+  try {
+    if ($dialog.ShowDialog($script:Gui.Form) -ne 'OK') { return }
+    $target = $dialog.FileName
+  } finally {
+    $dialog.Dispose()
+  }
+  # The dialog already asked before replacing a file.
+  if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
+  Set-GuiStatus "Backing up $($row.FullName)..."
+  [void](Invoke-GuiAction { Invoke-Backup $row.Id $target })
+}
+
+# The name a backup is restored under in the window: its own, or, while that
+# profile is still here, the first free one after it ("Work 2", "Work 3", ...).
+# "" means its own.
+function Get-FreeRestoreName([string] $FilePath) {
+  $old = (Read-BackupManifest $FilePath).profile
+  $name = Get-RecordValue $old 'name'
+  $appId = Get-RecordValue $old 'appId'
+  if (-not (Test-Path -LiteralPath (Get-RecordPath "$appId.$(Get-NameKey $name)"))) { return '' }
+  for ($i = 2; $i -lt 100; $i++) {
+    $candidate = "$name $i"
+    if ($candidate.Length -le 40 -and -not (Test-Path -LiteralPath (Get-RecordPath "$appId.$(Get-NameKey $candidate)"))) { return $candidate }
+  }
+  return ''
+}
+
+function Restore-Backup([string] $FilePath) {
+  if (-not $FilePath) {
+    $dialog = New-Object Windows.Forms.OpenFileDialog
+    $dialog.Title = 'Restore a Twinbar backup'
+    $dialog.Filter = 'Twinbar backups (*.zip)|*.zip'
+    $dir = Get-DefaultBackupDir
+    if (Test-Path -LiteralPath $dir) { $dialog.InitialDirectory = $dir }
+    try {
+      if ($dialog.ShowDialog($script:Gui.Form) -ne 'OK') { return }
+      $FilePath = $dialog.FileName
+    } finally {
+      $dialog.Dispose()
+    }
+  }
+  try {
+    $freeName = Get-FreeRestoreName $FilePath
+  } catch {
+    [void](Show-GuiMessage $script:Gui.Form (ConvertTo-Sentence $_.Exception.Message))
+    return
+  }
+  Set-GuiStatus 'Restoring...'
+  [void](Invoke-GuiAction { Invoke-Restore $FilePath -NewName $freeName })
 }
 
 function Open-SelectedProfile {
@@ -4039,6 +4487,10 @@ function New-ProfileDialog($Row) {
   $proxyRow.Margin = New-Object Windows.Forms.Padding(0)
   $proxyRow.Controls.Add($proxy)
   $proxyRow.Controls.Add($findProxy)
+  $appArgs = New-Object Windows.Forms.TextBox
+  $appArgs.Width = $wide
+  $envVars = New-Object Windows.Forms.TextBox
+  $envVars.Width = $wide
   $preview = New-Object Windows.Forms.PictureBox
   $preview.Size = New-Object Drawing.Size((Get-Scaled 128), (Get-Scaled 128))
   $preview.SizeMode = 'Zoom'
@@ -4046,13 +4498,14 @@ function New-ProfileDialog($Row) {
   $hint = New-Object Windows.Forms.Label
   $hint.Text = "Leave the badge empty for the name's first letter. Light and dark work for apps that follow Windows. " +
     'Proxy: like http://127.0.0.1:10809 or socks5://127.0.0.1:10808, or empty for none; if it is down, the profile stays offline. ' +
-    "Find looks for proxies on this computer. Prefer the HTTP address: some apps (Claude) don't use a SOCKS proxy outside Chromium."
+    "Find looks for proxies on this computer. Prefer the HTTP address: some apps (Claude) don't use a SOCKS proxy outside Chromium. " +
+    'Arguments go to the app (like --disable-gpu); environment variables are NAME=value; NAME2=value (not for Store apps).'
   $hint.AutoSize = $true
   $hint.MaximumSize = New-Object Drawing.Size(($wide + (Get-Scaled 90)), 0)
   $hint.ForeColor = [Drawing.SystemColors]::GrayText
 
   $rowIndex = 0
-  foreach ($pair in @(@('App', $appRow), @('Name', $name), @('Colour', $color), @('Badge', $badge), @('Icon', $style), @('Appearance', $appearance), @('Proxy', $proxyRow))) {
+  foreach ($pair in @(@('App', $appRow), @('Name', $name), @('Colour', $color), @('Badge', $badge), @('Icon', $style), @('Appearance', $appearance), @('Proxy', $proxyRow), @('Arguments', $appArgs), @('Environment', $envVars))) {
     $label = New-Object Windows.Forms.Label
     $label.Text = [string]$pair[0]
     $label.AutoSize = $true
@@ -4063,7 +4516,7 @@ function New-ProfileDialog($Row) {
     $rowIndex++
   }
   $grid.Controls.Add($preview, 2, 0)
-  $grid.SetRowSpan($preview, 7)
+  $grid.SetRowSpan($preview, 9)
   $grid.Controls.Add($hint, 1, $rowIndex)
   $grid.SetColumnSpan($hint, 2)
   $rowIndex++
@@ -4086,7 +4539,8 @@ function New-ProfileDialog($Row) {
   $appList = New-Object System.Collections.Generic.List[object]
   $state = @{
     Form = $d; Row = $Row; App = $app; AppList = $appList; Browse = $browse; Name = $name; Color = $color
-    Badge = $badge; Style = $style; Appearance = $appearance; Proxy = $proxy; FindProxy = $findProxy; Preview = $preview; Ok = $ok
+    Badge = $badge; Style = $style; Appearance = $appearance; Proxy = $proxy; FindProxy = $findProxy; AppArgs = $appArgs; EnvVars = $envVars
+    Preview = $preview; Ok = $ok
     ColorPicked = $false; Updating = $true
   }
   $script:Dialog = $state
@@ -4102,6 +4556,8 @@ function New-ProfileDialog($Row) {
     $name.Enabled = $false
     $badge.Text = $r.badge
     $proxy.Text = $r.proxy
+    $appArgs.Text = $r.userArgs
+    $envVars.Text = ($r.userEnv -split ';' | Where-Object { $_ }) -join '; '
     Select-ColorItem $color $r.color
     $style.SelectedItem = @($script:StyleNames.Keys | Where-Object { $script:StyleNames[$_] -eq $r.style })[0]
     $appearance.SelectedItem = @($script:AppearanceNames.Keys | Where-Object { $script:AppearanceNames[$_] -eq $r.appearance })[0]
@@ -4225,11 +4681,18 @@ function Submit-ProfileDialog($State) {
   $look = $script:StyleNames[[string]$State.Style.SelectedItem]
   $theme = $script:AppearanceNames[[string]$State.Appearance.SelectedItem]
   $route = $State.Proxy.Text.Trim()
+  $extra = $State.AppArgs.Text.Trim()
+  $vars = $State.EnvVars.Text.Trim()
   if ($State.Row) {
     $id = $State.Row.Id
     $letters = Get-DialogBadge $State
     $routeOrNone = if ($route) { $route } else { 'none' }
-    return (Invoke-GuiAction { Invoke-Change -Which $id -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme -ProxyValue $routeOrNone } $State.Form)
+    $extraOrNone = if ($extra) { $extra } else { 'none' }
+    $varsOrNone = if ($vars) { $vars } else { 'none' }
+    return (Invoke-GuiAction {
+        Invoke-Change -Which $id -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme -ProxyValue $routeOrNone `
+          -AppArgsValue $extraOrNone -EnvValue $varsOrNone
+      } $State.Form)
   }
   $chosen = Get-DialogApp $State
   if (-not $chosen) {
@@ -4239,7 +4702,10 @@ function Submit-ProfileDialog($State) {
   $source = $chosen.Source
   $label = $State.Name.Text
   $letters = $State.Badge.Text.Trim()
-  return (Invoke-GuiAction { Invoke-New -AppPath $source -ProfileName $label -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme -ProxyValue $route } $State.Form)
+  return (Invoke-GuiAction {
+      Invoke-New -AppPath $source -ProfileName $label -ColorName $hex -BadgeText $letters -StyleName $look -AppearanceName $theme -ProxyValue $route `
+        -AppArgsValue $extra -EnvValue $vars
+    } $State.Form)
 }
 
 function Show-ProfileDialog($Row) {
@@ -4310,9 +4776,23 @@ Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Ele
         -Proxy       socks5://host:port, http://host:port or https://host:port: the
                      profile's web traffic goes only through it (if it's down, the
                      profile is offline rather than going around it)
+        -AppArgs     extra command-line switches for the app, like "--disable-gpu"
+        -Environment environment variables for the app: "NAME=value;NAME2=value"
+                     (not for Microsoft Store apps)
   twinbar change PROFILE [-Color C] [-Badge B] [-Style S] [-Appearance A] [-Proxy P]
-      Change a profile's icon, appearance or proxy (-Proxy none removes it).
-      Its name and data stay.
+                 [-AppArgs "..."] [-Environment "..."]
+      Change a profile's icon, appearance, proxy or options (none removes
+      -Proxy, -AppArgs or -Environment). Its name and data stay.
+  twinbar storage [PROFILE] [-Json]
+      How much each profile's data takes, and how much of that is cache.
+  twinbar clean PROFILE
+      Clear a profile's cache. Its sign-in, settings and data stay.
+  twinbar backup PROFILE [-File FILE.zip]
+      Back a profile up to a zip (its settings and data, without caches), in
+      Documents\Twinbar backups unless -File says where.
+  twinbar restore FILE.zip [-Name NAME] [-App APP]
+      Make a profile again from a backup, under its own name or NAME. -App if
+      the app is somewhere else now.
   twinbar ip [PROFILE] [-Json]
       Show the IP address a profile's traffic comes from (through its proxy),
       next to the one without a proxy.
@@ -4393,9 +4873,16 @@ function Invoke-Twinbar {
     'new' {
       $profileName = if ($Name) { $Name } else { $Target }
       Invoke-New -AppPath $App -ProfileName $profileName -DataFolder $DataDir -Adopt:$AdoptDataDir -MenuDir $ShortcutDir `
-        -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance -ProxyValue $Proxy
+        -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance -ProxyValue $Proxy -AppArgsValue $AppArgs -EnvValue $Environment
     }
-    'change' { Invoke-Change -Which $Target -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance -ProxyValue $Proxy }
+    'change' {
+      Invoke-Change -Which $Target -ColorName $Color -BadgeText $Badge -StyleName $Style -AppearanceName $Appearance -ProxyValue $Proxy `
+        -AppArgsValue $AppArgs -EnvValue $Environment
+    }
+    'storage' { Invoke-Storage $Target -AsJson:$Json }
+    'clean' { Invoke-Clean $Target }
+    'backup' { Invoke-Backup $Target $File }
+    'restore' { Invoke-Restore $Target -NewName $Name -AppPath $App }
     'ip' { Invoke-Ip $Target -AsJson:$Json }
     'proxies' { Invoke-Proxies -AsJson:$Json }
     'update' { Invoke-Update -CheckOnly:$Check }

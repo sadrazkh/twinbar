@@ -515,6 +515,30 @@ try {
   Assert-Throws { Set-StartWithWindows $true } 'needs an installed Twinbar' "startup: not from a copy that isn't installed"
   Assert-True (-not (Test-StartWithWindows)) "startup: off until it's turned on"
 
+  # Extra arguments and environment variables, sizes, and the caches in a data folder.
+  Assert-Equal '--disable-gpu --lang=fa' (Resolve-AppArgs '  --disable-gpu --lang=fa ') 'arguments: tidied'
+  Assert-Equal '' (Resolve-AppArgs 'none') 'arguments: none'
+  Assert-Equal '--title="a b"' (Resolve-AppArgs '--title="a b"') 'arguments: quotes that close are fine'
+  Assert-Throws { Resolve-AppArgs '--User-Data-Dir=C:\x' } "can't set --user-data-dir" "arguments: the data folder isn't theirs to set"
+  Assert-Throws { Resolve-AppArgs '--title="a b' } 'never closed' 'arguments: a quote must close'
+  Assert-Throws { Resolve-AppArgs "--a`n--b" } 'one line' 'arguments: one line'
+  Assert-Equal 'A=1;B_2=x y;C=' (Resolve-EnvValue ' A=1; B_2 = x y ;C=') 'environment: NAME=value pairs, tidied'
+  Assert-Equal 'NODE_OPTIONS=--max-old-space-size=4096' (Resolve-EnvValue 'NODE_OPTIONS=--max-old-space-size=4096') "environment: '=' inside a value"
+  Assert-Equal '' (Resolve-EnvValue 'none') 'environment: none'
+  Assert-Throws { Resolve-EnvValue '1A=x' } 'NAME=value' 'environment: a name starts with a letter'
+  Assert-Throws { Resolve-EnvValue 'JUSTANAME' } 'NAME=value' 'environment: a value is needed'
+  Assert-Equal '--force-dark-mode --x' (Get-ExtraArgs 'dark' '' 'standard' '--x') "extra arguments come after Twinbar's own"
+  Assert-Equal '1.5 GB|20 MB|3 KB|512 bytes' ('{0}|{1}|{2}|{3}' -f (Format-Size 1610612736), (Format-Size 20971520), (Format-Size 3072), (Format-Size 512)) 'sizes read as GB, MB, KB'
+  $cacheTest = Join-Path $root 'cache test'
+  foreach ($d in 'Cache\Cache_Data', 'Code Cache\js', 'Local Storage', 'Partitions\p1\GPUCache', 'Partitions\p1\IndexedDB', 'Service Worker\CacheStorage', 'Service Worker\Database') {
+    [void][IO.Directory]::CreateDirectory((Join-Path $cacheTest $d))
+  }
+  Assert-Equal 'Cache|Code Cache|Service Worker\CacheStorage|Partitions\p1\GPUCache' ((@(Get-CacheFolders $cacheTest)) -join '|') 'caches: found at the top and in partitions, data left alone'
+  [IO.File]::WriteAllText((Join-Path $cacheTest 'Cache\Cache_Data\a'), ('x' * 1000))
+  [IO.File]::WriteAllText((Join-Path $cacheTest 'Local Storage\b'), ('y' * 500))
+  Assert-Equal 1500 ([TwinbarInterop.Files]::Size($cacheTest)) 'sizes: every file under a folder'
+  Assert-Equal 'Local Storage\b' (([TwinbarInterop.Files]::List($cacheTest, [string[]]@('Cache'))) -join '|') 'file lists: without the folders left out'
+
   # The jump list, under the tests' own ID. Windows keeps it in a file of its own;
   # the title is in there as UTF-16, at an even or an odd byte.
   $jumpDir = Join-Path $env:APPDATA 'Microsoft\Windows\Recent\CustomDestinations'
@@ -959,6 +983,107 @@ try {
   Assert-Cli (Invoke-Cli @('apps')) 0 'Fake Squirrel\s+squirrel' 'apps shows a table'
 
   # -------------------------------------------------------------------------
+  Write-Section 'Storage, options and backups'
+  Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+  $backupDir = Join-Path $root 'backups'
+  $script:extraEnv['TWINBAR_BACKUP_DIR'] = $backupDir
+  try {
+    $r = Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Kept', '-Color', 'green', '-Proxy', 'http://127.0.0.1:9', '-AppArgs', '--disable-gpu --lang=fa', '-Environment', 'TWINBAR_TEST_VAR=hello; OTHER=1')
+    Assert-Cli $r 0 'Made' 'new with extra arguments and environment variables'
+    $kept = Read-Record 'fakeapp.kept'
+    Assert-Equal '--disable-gpu --lang=fa|TWINBAR_TEST_VAR=hello;OTHER=1' ('{0}|{1}' -f $kept.userArgs, $kept.userEnv) 'the record has them'
+    Assert-True ($kept.extraArgs.StartsWith('--proxy-server=') -and $kept.extraArgs.EndsWith('--disable-gpu --lang=fa')) "the arguments come after Twinbar's own switches" $kept.extraArgs
+    Assert-Cli (Invoke-Cli @('change', 'Kept', '-AppArgs', '--user-data-dir=C:\x')) 1 "can't set --user-data-dir" 'the arguments may not move the data folder'
+    Assert-Cli (Invoke-Cli @('change', 'Kept', '-AppArgs', '--title="x')) 1 'never closed' 'the arguments need closed quotes'
+    Assert-Cli (Invoke-Cli @('change', 'Kept', '-Environment', 'NOT A PAIR')) 1 'NAME=value' 'environment variables must be NAME=value'
+
+    # Data as an Electron app keeps it: sign-in and settings, and caches (also in a partition).
+    $keptData = $kept.dataDir
+    $made = [ordered]@{
+      'Local Storage\leveldb\000003.log' = 'local storage'; 'Network\Cookies' = 'cookies'; 'Preferences' = '{"x":1}'
+      'Cache\Cache_Data\data_1' = ('c' * 50000); 'Code Cache\js\index' = ('j' * 20000); 'GPUCache\data_0' = ('g' * 10000)
+      'Partitions\work\Cache\Cache_Data\f_000001' = ('p' * 30000); 'Partitions\work\IndexedDB\db.leveldb\000005.ldb' = 'indexed'
+      'SingletonLock' = 'lock'
+    }
+    foreach ($f in $made.Keys) {
+      $path = Join-Path $keptData $f
+      [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+      [IO.File]::WriteAllText($path, $made[$f])
+    }
+
+    [IO.File]::WriteAllText((Join-Path $keptData 'stay.txt'), 'keep running')
+    Assert-Cli (Invoke-Cli @('open', 'Kept')) 0 'Opening' 'open it'
+    $launchedFile = Join-Path $keptData 'launched.txt'
+    if (Wait-Until { Test-Path -LiteralPath $launchedFile } 20) {
+      $lines = [IO.File]::ReadAllLines($launchedFile)
+      Assert-Equal 'testvar=hello' (@($lines | Where-Object { $_ -like 'testvar=*' })[0]) 'the app gets its environment variables'
+      Assert-True ((@($lines | Where-Object { $_ -like 'commandline=*' })[0]).EndsWith('--disable-gpu --lang=fa')) 'and its extra arguments'
+    } else {
+      Assert-True $false 'it started'
+    }
+    Assert-Cli (Invoke-Cli @('clean', 'Kept')) 1 'is running' "clean: not while it's running"
+    Assert-Cli (Invoke-Cli @('backup', 'Kept')) 1 'is running' "backup: not while it's running"
+    Remove-Item -LiteralPath (Join-Path $keptData 'stay.txt')
+    Assert-True (Wait-Until { @(Get-ProcessesFor $keptData).Count -eq 0 -and @(Get-LaunchersFor 'fakeapp.kept').Count -eq 0 } 30) 'it quit'
+    Remove-Item -LiteralPath $launchedFile -ErrorAction SilentlyContinue
+
+    $r = Invoke-Cli @('storage', 'Kept', '-Json')
+    $st = @((ConvertFrom-Json $r.Out) | ForEach-Object { $_ })
+    Assert-True ($st.Count -eq 1 -and $st[0].cache -eq 110000 -and $st[0].total -gt 110000) 'storage: the size, and the cache in it (partitions too)' ($r.Out -replace '\s+', ' ')
+    Assert-Cli (Invoke-Cli @('storage')) 0 'Fake App Kept\s+\d+ KB\s+107 KB' 'storage as a table'
+
+    # Back up, then restore next to it and in its place.
+    Assert-Cli (Invoke-Cli @('backup', 'Kept')) 0 'Backed up "Fake App Kept"' 'backup'
+    $zips = @(Get-ChildItem -LiteralPath $backupDir -Filter 'fakeapp.kept-*.zip' -ErrorAction SilentlyContinue)
+    Assert-Equal 1 $zips.Count 'backup: a zip in the backup folder'
+    if ($zips.Count) {
+      $zipFile = $zips[0].FullName
+      $zip = [IO.Compression.ZipFile]::OpenRead($zipFile)
+      $names = @($zip.Entries | ForEach-Object { $_.FullName })
+      $zip.Dispose()
+      Assert-True ($names -contains 'twinbar-backup.json' -and $names -contains 'data/Network/Cookies' -and $names -contains 'data/Partitions/work/IndexedDB/db.leveldb/000005.ldb') 'backup: the settings, sign-in and data' ($names -join ', ')
+      Assert-Equal 0 @($names | Where-Object { $_ -match '/(Cache|Code Cache|GPUCache)/|SingletonLock|\.twinbar-profile' }).Count 'backup: without caches, lock files or the marker'
+      Assert-Cli (Invoke-Cli @('restore', $zipFile)) 1 'already a profile' "restore: not over a profile that's still there"
+      Assert-Cli (Invoke-Cli @('restore', $zipFile, '-Name', 'Copy')) 0 'Made "Fake App Copy"' 'restore under another name'
+      $copy = Read-Record 'fakeapp.copy'
+      Assert-Equal '#30A46C|http://127.0.0.1:9|--disable-gpu --lang=fa|TWINBAR_TEST_VAR=hello;OTHER=1|C' ('{0}|{1}|{2}|{3}|{4}' -f $copy.color, $copy.proxy, $copy.userArgs, $copy.userEnv, $copy.badge) 'restore: with the look, proxy and options, and a badge for its name'
+      Assert-Equal 'cookies' ([IO.File]::ReadAllText((Join-Path $copy.dataDir 'Network\Cookies'))) 'restore: with the data'
+      Assert-True (-not (Test-Path -LiteralPath (Join-Path $copy.dataDir 'Cache'))) 'restore: and no cache'
+      Assert-Cli (Invoke-Cli @('remove', 'Kept', '-DeleteData')) 0 'Removed' 'remove Kept with its data'
+      $r = Invoke-Cli @('restore', $zipFile)
+      Assert-Cli $r 0 'Made "Fake App Kept"' 'restore it as it was'
+      Assert-True ($r.Out -notmatch 'another Windows account') 'restore: from this account, no note about signing in again'
+      Assert-Equal 'indexed' ([IO.File]::ReadAllText((Join-Path $keptData 'Partitions\work\IndexedDB\db.leveldb\000005.ldb'))) 'restore: partitions too'
+    }
+
+    # Clearing the cache.
+    [void][IO.Directory]::CreateDirectory((Join-Path $keptData 'Code Cache\js'))
+    [IO.File]::WriteAllText((Join-Path $keptData 'Code Cache\js\index'), ('j' * 20000))
+    Assert-Cli (Invoke-Cli @('clean', 'Kept')) 0 'Cleared 20 KB of cache from Fake App Kept' 'clean'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $keptData 'Code Cache')) -and (Test-Path -LiteralPath (Join-Path $keptData 'Network\Cookies'))) 'clean: the cache went, the sign-in stayed'
+
+    # A backup with a file that would land outside the data folder is refused.
+    $evil = Join-Path $root 'evil.zip'
+    $zip = [IO.Compression.ZipFile]::Open($evil, 'Create')
+    $w = New-Object IO.StreamWriter($zip.CreateEntry('twinbar-backup.json').Open())
+    $w.Write('{"format":1,"user":"x","profile":' + [IO.File]::ReadAllText((Join-Path $twHome 'profiles\fakeapp.copy.json')) + '}')
+    $w.Dispose()
+    $w = New-Object IO.StreamWriter($zip.CreateEntry('data/../../escaped.txt').Open())
+    $w.Write('no')
+    $w.Dispose()
+    $zip.Dispose()
+    Assert-Cli (Invoke-Cli @('restore', $evil, '-Name', 'Evil')) 1 'outside the profile' 'restore: a file outside the data folder is refused'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $twHome 'data\escaped.txt'))) 'restore: and nothing lands there'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $twHome 'profiles\fakeapp.evil.json')) -and -not (Test-Path -LiteralPath (Join-Path $twHome 'data\fakeapp\evil'))) 'restore: and nothing is left behind'
+    Assert-Cli (Invoke-Cli @('restore', (Join-Path $root 'nope.zip'))) 1 "there's no file" 'restore: a missing file'
+    Assert-Cli (Invoke-Cli @('restore', $cli)) 1 "isn't a Twinbar backup" "restore: a file that isn't a backup"
+
+    foreach ($id in 'fakeapp.kept', 'fakeapp.copy') { Assert-Cli (Invoke-Cli @('remove', $id, '-DeleteData')) 0 'Removed' "remove $id" }
+  } finally {
+    $script:extraEnv.Remove('TWINBAR_BACKUP_DIR')
+  }
+
+  # -------------------------------------------------------------------------
   Write-Section 'Updates'
   # A stand-in for GitHub: the newest release, its SHA256SUMS, and an installer that
   # writes down how it was started.
@@ -1110,6 +1235,27 @@ public static class TwinbarFakeSetup {
     Assert-Equal 'http://127.0.0.1:10809' $proxyDialog.Proxy.Text 'Find proxy: picking one fills in the Proxy field'
     $proxyMenu.Dispose()
     $proxyDialog.Form.Dispose()
+
+    # Arguments and environment variables in the window, the right-click menu, and
+    # restoring a backup next to its profile.
+    $optionsDialog = New-ProfileDialog $row
+    Assert-True ($optionsDialog.AppArgs.Text -eq '' -and $optionsDialog.EnvVars.Text -eq '') 'Edit: no extra arguments or environment variables yet'
+    $optionsDialog.AppArgs.Text = '--disable-gpu'
+    $optionsDialog.EnvVars.Text = 'A=1; B=2'
+    Assert-True (Submit-ProfileDialog $optionsDialog) 'Edit: Save with arguments and environment variables'
+    $optionsDialog.Form.Dispose()
+    $withOptions = Read-Record 'fakeapp.windowed'
+    Assert-Equal '--disable-gpu|A=1;B=2' ('{0}|{1}' -f $withOptions.userArgs, $withOptions.userEnv) 'Edit: they are kept'
+    $reopened = New-ProfileDialog (@($script:Gui.Rows | Where-Object { $_.Id -eq 'fakeapp.windowed' })[0])
+    Assert-Equal '--disable-gpu|A=1; B=2' ('{0}|{1}' -f $reopened.AppArgs.Text, $reopened.EnvVars.Text) 'Edit: and shown again'
+    $reopened.Form.Dispose()
+    $profileMenu = New-ProfileMenu
+    $menuTexts = @($profileMenu.Items | ForEach-Object { $_.Text })
+    Assert-True ($menuTexts -contains 'Open' -and $menuTexts -contains 'Clear cache...' -and $menuTexts -contains 'Back up...' -and $menuTexts -contains 'Remove...') 'right-click: what can be done with a profile' ($menuTexts -join ' | ')
+    $profileMenu.Dispose()
+    $windowedZip = Join-Path $root 'windowed.zip'
+    [void](Invoke-Backup 'fakeapp.windowed' $windowedZip)
+    Assert-Equal 'Windowed 2' (Get-FreeRestoreName $windowedZip) 'Restore: next to a profile that is still there, the next free name'
 
     # Updates in the window, from the same stand-in for GitHub.
     Assert-Equal "Twinbar $version" $script:Gui.Version.Text 'the status bar shows the version'

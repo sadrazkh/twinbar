@@ -6,6 +6,38 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-22
+
+Storage and cache, extra options per profile, and backups.
+
+### Added
+
+- `twinbar storage [PROFILE] [-Json]`: how much each profile's data takes, and
+  how much of it is cache. More... > Storage of the profiles shows the same.
+- `twinbar clean PROFILE` and Clear cache... (right-click a profile): deletes
+  only the profile's caches (Chromium's Cache, Code Cache, GPU and shader
+  caches, service worker caches and crash reports, in its session partitions
+  too); its sign-in, settings and local data stay, and the app fills the
+  cache again.
+- `-AppArgs "..."` and `-Environment "NAME=value;NAME2=value"` for `new` and
+  `change` (`none` removes them), and Arguments and Environment in the
+  New/Edit window: extra command-line switches for the app (`--disable-gpu`,
+  say) and environment variables for it. `--user-data-dir` stays Twinbar's.
+  Windows doesn't let Store apps be given environment variables, so only the
+  arguments apply to them.
+- `twinbar backup PROFILE [-File FILE.zip]` and Back up... (right-click a
+  profile): the profile's settings and data folder in a zip, without caches,
+  in Documents\Twinbar backups unless you pick a file. `twinbar restore
+  FILE.zip [-Name NAME] [-App APP]` and More... > Restore a backup... make the
+  profile again from it, with its look, proxy and options (the window picks
+  the next free name, "Work 2", while the original is still there). Apps tie
+  their sign-in to your Windows account, so a backup restored on another
+  computer or account has its data but usually needs signing in again
+  (Twinbar says so). A backup holds the sign-in: keep it as safe as a
+  password.
+- Right-click a profile in the window for all it can do: Open, Edit, Check IP,
+  Clear cache, Back up, Repair, Remove.
+
 ## [0.8.0] - 2026-11-22
 
 An icon by the clock, starting with Windows, and a jump list.
