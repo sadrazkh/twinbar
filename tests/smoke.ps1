@@ -1236,6 +1236,26 @@ public static class TwinbarTestWindows {
   // What the window's X button sends (WM_SYSCOMMAND, SC_CLOSE). A plain WM_CLOSE,
   // as Process.CloseMainWindow sends, ends Twinbar instead.
   public static void CloseLikeUser(IntPtr window) { PostMessageW(window, 0x0112, (IntPtr)0xF060, IntPtr.Zero); }
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr lParam);
+  [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr hwnd, out int pid);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr hwnd, StringBuilder text, int size);
+  // The visible top-level windows of a process, as "class | title", for test reports.
+  public static string VisibleWindows(int processId) {
+    StringBuilder found = new StringBuilder();
+    EnumWindows(delegate (IntPtr hwnd, IntPtr lParam) {
+      int pid;
+      GetWindowThreadProcessId(hwnd, out pid);
+      if (pid == processId && IsWindowVisible(hwnd)) {
+        StringBuilder name = new StringBuilder(256), title = new StringBuilder(256);
+        GetClassNameW(hwnd, name, name.Capacity);
+        GetWindowTextW(hwnd, title, title.Capacity);
+        found.Append(name).Append(" | ").Append(title).Append("; ");
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found.ToString();
+  }
   public static int ListRows(IntPtr window) {
     int rows = -1;
     EnumChildWindows(window, delegate (IntPtr hwnd, IntPtr lParam) {
@@ -1260,12 +1280,18 @@ public static class TwinbarTestWindows {
     if ($null -ne (Get-TaskbarAppIds)) {
       Assert-True (Wait-Until { (Get-TaskbarAppIds) -contains 'Twinbar.App' } 10) 'Twinbar has a taskbar button of its own'
     }
-    [TwinbarTestWindows]::CloseLikeUser($appProcess.MainWindowHandle)
-    Assert-True (Wait-Until { $appProcess.Refresh(); $appProcess.HasExited -or $appProcess.MainWindowHandle -eq [IntPtr]::Zero } 10) 'closing the window hides it'
+    $appWindow = $appProcess.MainWindowHandle
+    [TwinbarTestWindows]::CloseLikeUser($appWindow)
+    $hidden = Wait-Until { $appProcess.HasExited -or -not [TwinbarTestWindows]::IsWindowVisible($appWindow) } 20
+    $seen = if ($appProcess.HasExited) { 'it exited' } else {
+      'visible: {0} window visible: {1}; settings: {2}' -f [TwinbarTestWindows]::VisibleWindows($appProcess.Id), [TwinbarTestWindows]::IsWindowVisible($appWindow),
+      ([IO.File]::ReadAllText((Join-Path $twHome 'settings.json')) -replace '\s+', ' ')
+    }
+    Assert-True $hidden 'closing the window hides it' $seen
     Assert-True (-not $appProcess.HasExited) 'and Twinbar stays by the clock'
     $again = [Diagnostics.Process]::Start($appExe)
     [void]$again.WaitForExit(20000)
-    Assert-True (Wait-Until { $appProcess.Refresh(); $appProcess.MainWindowHandle -ne [IntPtr]::Zero } 15) 'opening Twinbar again shows that window'
+    Assert-True (Wait-Until { -not $appProcess.HasExited -and [TwinbarTestWindows]::IsWindowVisible($appWindow) } 15) 'opening Twinbar again shows that window'
     $quit = [Diagnostics.Process]::Start($appExe, '--quit')
     [void]$quit.WaitForExit(20000)
     Assert-True ($appProcess.WaitForExit(15000) -and $appProcess.ExitCode -eq 0) 'Twinbar.exe --quit ends it'
