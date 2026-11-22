@@ -1,0 +1,6 @@
+# Test output and local scratch
+/tests/out/
+*.tmp
+*.log
+Thumbs.db
+desktop.ini
