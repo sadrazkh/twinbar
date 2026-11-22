@@ -152,6 +152,18 @@ closing.
   Dependabot keeps them current, waiting 14 days for new releases.
 - CONTRIBUTING.md, SECURITY.md, and the README's download section and badges.
 
+Added after 0.5.0 (0.5.1): a Windows installer, `Twinbar-Setup-<version>.exe`,
+built with Inno Setup 6 (on GitHub's Windows runners already). It installs per
+user with no admin rights, copies the files and then runs `twinbar install` in
+that folder, so `Twinbar.exe` is still compiled on the user's computer; it adds
+an uninstall entry to Settings > Apps (which runs `twinbar uninstall`), offers
+the PATH option, waits for an open Twinbar window to close (`AppMutex`), and
+after an upgrade runs `rebuild -All`. CI and Release test it on a clean
+machine: silent install, the window, the installed `twinbar.cmd`, silent
+uninstall. Not code-signed: a certificate costs money, so for now Windows
+SmartScreen asks once ("More info", "Run anyway"). A double-click on
+`twinbar.cmd` now opens the window too.
+
 Left out, on purpose: winget. Its manifests live in Microsoft's
 `winget-pkgs` repository, so publishing there means a pull request there from
 the owner's account; the zip and its hash are what it would need.

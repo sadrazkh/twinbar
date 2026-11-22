@@ -14,7 +14,9 @@ Bug reports, ideas and pull requests are welcome.
 | `twinbar.ps1` | All of Twinbar: the commands, the window, and the C# for the launcher, `Twinbar.exe` and the Windows interop, compiled on the user's computer |
 | `twinbar.cmd` | Runs `twinbar.ps1` whatever the execution policy is |
 | `tests/smoke.ps1` | The tests: static checks, unit checks, and end-to-end checks with a fake Electron app (`tests/FakeApp.cs`) |
-| `tools/make-release.ps1` | Builds the release files |
+| `tools/make-release.ps1` | Builds the release files; with `-Installer`, the Windows installer too (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)) |
+| `installer/twinbar.iss` | The Windows installer: copies the files, then runs `twinbar install` in that folder |
+| `tests/installer.ps1` | Installs the built installer silently, opens the window, uninstalls; CI runs it |
 | `docs/` | [phases](docs/phases.md) (what was built, and what was measured on the way) and images |
 | `.github/workflows/` | CI and Release |
 
@@ -55,8 +57,9 @@ the tests with [PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer
 1. Raise `$script:TwinbarVersion` at the top of `twinbar.ps1`.
 2. Add a `## [x.y.z] - date` section to `CHANGELOG.md` (the tests check it's there).
 3. Push to `main`. The Release workflow sees a version without a tag, runs the
-   tests, builds the files, records their provenance, and creates the tag and
-   the release with that CHANGELOG section as its notes.
+   tests, builds the files and the installer, tests installing and
+   uninstalling, records their provenance, and creates the tag and the release
+   with that CHANGELOG section as its notes.
 
 ## Pull requests
 

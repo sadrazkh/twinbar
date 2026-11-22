@@ -14,7 +14,7 @@ the same time. Microsoft Store apps such as Claude work too.
 
 ![The same app's icon in Twinbar's four styles: original, colour and badge, colour only, badge only](docs/styles.png)
 
-> **Status: first release (0.5.0).** All five phases are done; see
+> **Status: early releases (0.5.x).** All five phases are done; see
 > [docs/phases.md](docs/phases.md). It's young: tested on Windows 11 with a
 > handful of apps, so please report what doesn't work.
 
@@ -28,17 +28,19 @@ the same time. Microsoft Store apps such as Claude work too.
 
 ## Get it
 
-Download `twinbar-<version>.zip` from the
-[latest release](https://github.com/sadrazkh/twinbar/releases/latest), unpack
-it anywhere, and in that folder run:
+Download **`Twinbar-Setup-<version>.exe`** from the
+[latest release](https://github.com/sadrazkh/twinbar/releases/latest) and run
+it. It installs Twinbar for you only, with no admin rights, into
+`%LOCALAPPDATA%\Programs\Twinbar`, puts **Twinbar** in the Start menu and opens
+it; tick the option to also type `twinbar` in any terminal. Uninstall it from
+Settings > Apps; your profiles stay and keep working.
 
-```powershell
-.\twinbar.cmd install -AddToPath
-```
+The installer isn't code-signed yet, so Windows may say "Windows protected your
+PC": click **More info**, then **Run anyway**.
 
-This puts **Twinbar** in the Start menu (in `%LOCALAPPDATA%\Programs\Twinbar`,
-for you only); `-AddToPath` also lets you type `twinbar` in any new terminal.
-`twinbar uninstall` takes it away again; your profiles stay and keep working.
+Or download `twinbar-<version>.zip`, unpack it anywhere, and double-click
+`twinbar.cmd` to open the window, or run `.\twinbar.cmd install -AddToPath`
+there to install it the same way.
 
 With [Scoop](https://scoop.sh), from the release's manifest (then
 `twinbar install` for the Start menu entry):
@@ -51,7 +53,7 @@ Or from the source: `git clone https://github.com/sadrazkh/twinbar.git`, then
 the same `.\twinbar.cmd install` in that folder.
 
 Each release lists the files' SHA-256 in `SHA256SUMS` and has signed build
-provenance: `gh attestation verify twinbar-<version>.zip -R sadrazkh/twinbar`.
+provenance: `gh attestation verify Twinbar-Setup-<version>.exe -R sadrazkh/twinbar`.
 
 You can also use it without installing: `.\twinbar.cmd` runs `twinbar.ps1`
 whatever your PowerShell execution policy is, and `.\twinbar.cmd gui` opens the

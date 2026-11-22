@@ -6,6 +6,30 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-22
+
+A Windows installer.
+
+### Added
+
+- `Twinbar-Setup-<version>.exe` in each release: double-click it to install
+  Twinbar for you (no admin rights) into `%LOCALAPPDATA%\Programs\Twinbar`,
+  with Twinbar in the Start menu and in Settings > Apps, and an option to put
+  `twinbar` on your PATH. It opens Twinbar when it's done. It runs
+  `twinbar install` in that folder, so `Twinbar.exe` is still compiled on your
+  computer; installing over an earlier version also brings your profiles up
+  to date (`twinbar rebuild -All`). Uninstalling keeps your profiles. Built
+  with Inno Setup; not code-signed yet, so Windows may ask you to confirm.
+- CI builds the installer and tests a silent install, the window, and a silent
+  uninstall on every push.
+
+### Changed
+
+- Double-clicking `twinbar.cmd` opens the Twinbar window instead of flashing
+  the help text.
+- `twinbar install -Dir <folder>` works from a copy that's already in that
+  folder (as the installer runs it), and installs CHANGELOG.md too.
+
 ## [0.5.0] - 2026-11-22
 
 The first release. Twinbar gives an Electron app (Slack, Discord, Postman,

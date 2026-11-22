@@ -48,9 +48,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.5.0'
+$script:TwinbarVersion = '0.5.1'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
+$script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
 $script:MarkerName = '.twinbar-profile' # in each data folder Twinbar created or adopted
 $script:AppIdPrefix = 'Twinbar'          # AppUserModelID: Twinbar.<app id>.<name key>
 $script:LauncherName = 'twinbar-launcher.exe'
@@ -271,7 +272,6 @@ namespace TwinbarInterop {
       IntPtr result;
       SendMessageTimeoutW(new IntPtr(0xFFFF), 0x1A, IntPtr.Zero, "Environment", 2, 1000, out result); // HWND_BROADCAST, WM_SETTINGCHANGE
     }
-
     [DllImport("user32.dll")]
     static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
 
@@ -1283,7 +1283,7 @@ function Invoke-Apps([switch] $AsJson) {
 
 $script:CmdWrapper = "@echo off`r`nrem Twinbar: runs twinbar.ps1 with Windows PowerShell, whatever the execution policy.`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0twinbar.ps1`" %*`r`nexit /b %ERRORLEVEL%`r`n"
 $script:InstallMarker = '.twinbar-install'
-$script:InstalledFiles = @('twinbar.ps1', 'twinbar.cmd', 'Twinbar.exe', 'twinbar.ico', 'LICENSE', 'README.md', '.twinbar-install')
+$script:InstalledFiles = @('twinbar.ps1', 'twinbar.cmd', 'Twinbar.exe', 'twinbar.ico', 'LICENSE', 'README.md', 'CHANGELOG.md', '.twinbar-install')
 
 function Get-DefaultInstallDir { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Twinbar' }
 function Get-InstallInfoPath { Join-Path (Get-TwinbarHome) 'install.json' }
@@ -1317,13 +1317,15 @@ function Invoke-Install([string] $Folder, [string] $MenuDir, [switch] $OnPath) {
   $target = if ($Folder) { (Resolve-FullPath $Folder).TrimEnd('\') } else { Get-DefaultInstallDir }
   if (Test-ProtectedDir $target) { Stop-Twinbar "$target can't be Twinbar's folder; pick a folder of its own" }
   $marker = Join-Path $target $script:InstallMarker
-  if ((Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $marker) -and
+  # Installing a copy into its own folder (as the Windows installer does) is fine;
+  # otherwise only an empty folder, or one Twinbar installed into before.
+  if ($source -ine $target -and (Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $marker) -and
     @(Get-ChildItem -LiteralPath $target -Force | Select-Object -First 1).Count) {
     Stop-Twinbar "$target already has other files in it; pick an empty folder"
   }
   [void][IO.Directory]::CreateDirectory($target)
   if ($source -ine $target) {
-    foreach ($file in 'twinbar.ps1', 'LICENSE', 'README.md') {
+    foreach ($file in 'twinbar.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md') {
       $from = Join-Path $source $file
       if (Test-Path -LiteralPath $from) { Copy-Item -LiteralPath $from -Destination (Join-Path $target $file) -Force }
     }
@@ -2969,7 +2971,34 @@ Profiles live in $(Get-TwinbarHome).
 "@
 }
 
+# True when twinbar.cmd was double-clicked in Explorer (Explorer > cmd > PowerShell),
+# rather than typed in a terminal.
+function Test-StartedByDoubleClick {
+  try {
+    $me = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $PID"
+    $parent = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($me.ParentProcessId)"
+    if ($null -eq $parent -or $parent.Name -ine 'cmd.exe') { return $false }
+    $grandparent = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($parent.ParentProcessId)"
+    return ($null -ne $grandparent -and $grandparent.Name -ieq 'explorer.exe')
+  } catch {
+    return $false
+  }
+}
+
 function Invoke-Twinbar {
+  if (-not $script:CommandGiven -and (Test-StartedByDoubleClick)) {
+    # A double-click on twinbar.cmd opens the window, not a flash of help text. The
+    # window runs in a new process without a console, and this one ends, so no
+    # console stays on screen (Windows Terminal doesn't let a console hide itself).
+    $exe = Join-Path (Split-Path -Parent $script:SelfPath) 'Twinbar.exe'
+    if (Test-Path -LiteralPath $exe) {
+      Start-Process -FilePath $exe
+    } else {
+      Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -WindowStyle Hidden `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$($script:SelfPath)`"", 'gui')
+    }
+    return
+  }
   $cmd = if ($Command) { $Command.Trim().ToLowerInvariant() } else { 'help' }
   switch ($cmd) {
     'new' {

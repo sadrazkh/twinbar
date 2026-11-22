@@ -84,11 +84,12 @@ function ConvertTo-ArgString([string] $Value) {
   return '"' + $escaped + '"'
 }
 
-# Runs twinbar.ps1 in a fresh Windows PowerShell, with TWINBAR_HOME pointing at the test folder.
-function Invoke-Cli([string[]] $Arguments) {
+# Runs twinbar.ps1 (or another copy of it) in a fresh Windows PowerShell, with
+# TWINBAR_HOME pointing at the test folder.
+function Invoke-Cli([string[]] $Arguments, [string] $Script = $cli) {
   $psi = New-Object Diagnostics.ProcessStartInfo
   $psi.FileName = $powershellExe
-  $all = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $cli) + $Arguments
+  $all = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Script) + $Arguments
   $psi.Arguments = (@($all | ForEach-Object { ConvertTo-ArgString $_ })) -join ' '
   $psi.UseShellExecute = $false
   $psi.RedirectStandardOutput = $true
@@ -765,7 +766,7 @@ try {
   Write-Section 'Installing'
   $installDir = Join-Path $root 'installed twinbar'
   Assert-Cli (Invoke-Cli @('install', '-Dir', $installDir)) 0 'Installed Twinbar' 'install'
-  foreach ($file in 'twinbar.ps1', 'twinbar.cmd', 'Twinbar.exe', 'twinbar.ico', 'LICENSE', 'README.md', '.twinbar-install') {
+  foreach ($file in 'twinbar.ps1', 'twinbar.cmd', 'Twinbar.exe', 'twinbar.ico', 'LICENSE', 'README.md', 'CHANGELOG.md', '.twinbar-install') {
     Assert-True (Test-Path -LiteralPath (Join-Path $installDir $file)) "installed $file"
   }
   $appExe = Join-Path $installDir 'Twinbar.exe'
@@ -847,6 +848,19 @@ public static class TwinbarTestWindows {
   Assert-True (-not (Test-Path -LiteralPath $installDir)) 'its folder is gone'
   Assert-True (-not (Test-Path -LiteralPath $appLink)) 'its Start menu entry is gone'
   Assert-Cli (Invoke-Cli @('uninstall', '-Dir', $installDir)) 1 "isn't installed" "uninstalling what isn't there fails"
+
+  # What the Windows installer does: copy the files, then run that copy's install into its own folder.
+  $ownDir = Join-Path $root 'own folder'
+  [void][IO.Directory]::CreateDirectory($ownDir)
+  foreach ($file in 'twinbar.ps1', 'twinbar.cmd', 'README.md', 'LICENSE', 'CHANGELOG.md') { Copy-Item -LiteralPath (Join-Path $repo $file) -Destination $ownDir }
+  $ownScript = Join-Path $ownDir 'twinbar.ps1'
+  Assert-Cli (Invoke-Cli @('install', '-Dir', $ownDir) $ownScript) 0 'Installed Twinbar' 'a copy installs into its own folder, as the installer does'
+  Assert-True (Test-Path -LiteralPath (Join-Path $ownDir 'Twinbar.exe')) 'Twinbar.exe was built there'
+  Assert-Equal ([IO.File]::ReadAllText($cli)) ([IO.File]::ReadAllText($ownScript)) 'its twinbar.ps1 is untouched'
+  Assert-Cli (Invoke-Cli @('install', '-Dir', $ownDir) $ownScript) 0 'Installed Twinbar' 'and again, as an upgrade does'
+  Assert-Cli (Invoke-Cli @('uninstall', '-Dir', $ownDir) $ownScript) 0 'Uninstalled' 'that copy uninstalls itself'
+  Assert-True (-not (Test-Path -LiteralPath $ownDir)) 'and its folder is gone'
+  Assert-True (-not (Test-StartedByDoubleClick)) "run from a terminal, twinbar isn't treated as double-clicked"
 
   # -------------------------------------------------------------------------
   if ($RealApp) {
