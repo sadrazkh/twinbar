@@ -104,9 +104,10 @@ begin
     Arguments := 'install -Dir "' + ExpandConstant('{app}') + '"';
     if WizardIsTaskSelected('addtopath') then
       Arguments := Arguments + ' -AddToPath';
+    // (No line in this section may start with "#": the preprocessor would take it as a directive.)
     if RunTwinbar(Arguments, Output) <> 0 then
-      SuppressibleMsgBox('Twinbar''s files were copied, but setting it up didn''t work:' + #13#10#13#10 + Output +
-        #13#10 + 'You can try again later in a terminal: twinbar.cmd install', mbError, MB_OK, IDOK)
+      SuppressibleMsgBox('Twinbar''s files were copied, but setting it up didn''t work:' + #13#10#13#10 +
+        Output + #13#10 + 'You can try again later in a terminal: twinbar.cmd install', mbError, MB_OK, IDOK)
     else
       // Profiles made with an earlier version get the new launcher and icons; open ones are left as they are.
       RunTwinbar('rebuild -All', Output);

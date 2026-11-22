@@ -25,6 +25,24 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Runs a program and returns its exit code and everything it printed. Only the
+# exit code says whether it failed: Windows PowerShell would otherwise turn any
+# line on stderr (a warning, say) into an error.
+function Invoke-Native([string] $Program, [string[]] $Arguments) {
+  $ErrorActionPreference = 'Continue'
+  $lines = & $Program @Arguments 2>&1 | ForEach-Object { [string]$_ }
+  return [pscustomobject]@{ Code = $LASTEXITCODE; Output = (@($lines) -join "`n") }
+}
+
+# On GitHub, a failure becomes an annotation on the run, readable without the log.
+trap {
+  if ($env:GITHUB_ACTIONS -eq 'true') {
+    $message = ($_.Exception.Message -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+    Write-Host "::error title=make-release failed::$message"
+  }
+  break
+}
+
 $repo = Split-Path -Parent $PSScriptRoot
 $utf8 = New-Object System.Text.UTF8Encoding $false
 $source = [IO.File]::ReadAllText((Join-Path $repo 'twinbar.ps1'))
@@ -83,10 +101,14 @@ if ($Installer) {
   try {
     $iconPath = Join-Path $work 'twinbar.ico'
     $draw = "& { . '$((Join-Path $repo 'twinbar.ps1').Replace("'", "''"))'; Initialize-Interop; [TwinbarInterop.IconMaker]::BuildAppIcon('$($iconPath.Replace("'", "''"))') }"
-    & (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -ExecutionPolicy Bypass -Command $draw
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $iconPath)) { throw "couldn't draw Twinbar's icon" }
-    $output = & $Iscc "/DAppVersion=$version" "/DIconFile=$iconPath" "/O$OutDir" (Join-Path $repo 'installer\twinbar.iss') 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed:`n$($output | Out-String)" }
+    $drawn = Invoke-Native (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $draw)
+    if ($drawn.Code -ne 0 -or -not (Test-Path -LiteralPath $iconPath)) { throw "couldn't draw Twinbar's icon:`n$($drawn.Output)" }
+    $compiled = Invoke-Native $Iscc @("/DAppVersion=$version", "/DIconFile=$iconPath", "/O$OutDir", (Join-Path $repo 'installer\twinbar.iss'))
+    $compiled.Output.TrimEnd() -split "`n" | ForEach-Object { "  iscc: $($_.TrimEnd())" }
+    if ($compiled.Code -ne 0) {
+      $errors = @($compiled.Output -split "`n" | Where-Object { $_ -match 'Error|error' }) -join ' '
+      throw "Inno Setup failed (exit $($compiled.Code)): $errors"
+    }
   } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
   }

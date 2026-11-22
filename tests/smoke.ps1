@@ -259,6 +259,42 @@ try {
     Assert-True ([IO.File]::ReadAllText($notes) -match 'scoop install' -and [IO.File]::ReadAllText($notes) -match '### ') "the release notes have the version's changes and how to install"
   }
 
+  # The installer script: Inno Setup's preprocessor takes any line starting with
+  # "#" as a directive, even in [Code] (a line starting with #13#10 broke a build).
+  $iss = [IO.File]::ReadAllLines((Join-Path $repo 'installer\twinbar.iss'))
+  $directive = '^\s*#\s*(if|ifdef|ifndef|elif|else|endif|define|undef|include|error|emit|expr|pragma|sub|endsub|for|insert|append|file|preproc)\b'
+  $stray = @(for ($i = 0; $i -lt $iss.Count; $i++) { if ($iss[$i] -match '^\s*#' -and $iss[$i] -notmatch $directive) { "line $($i + 1): $($iss[$i].Trim())" } })
+  Assert-Equal 0 $stray.Count 'installer\twinbar.iss: every line starting with # is a preprocessor directive' ($stray -join ' | ')
+  Assert-True ([IO.File]::ReadAllText((Join-Path $repo 'installer\twinbar.iss')) -match "OutputBaseFilename=Twinbar-Setup-\{#AppVersion\}") 'the installer is named Twinbar-Setup-<version>.exe'
+
+  # make-release -Installer, with stand-ins for Inno Setup's compiler (the real one runs in CI).
+  # (In PowerShell: cmd.exe would split "/DAppVersion=x" at the "=".)
+  $fakeIscc = Join-Path $root 'fake iscc.ps1'
+  [IO.File]::WriteAllText($fakeIscc, (@(
+        '# A stand-in for ISCC.exe: checks its arguments and writes an empty "installer".'
+        '$version = [string]($args | Where-Object { $_ -like "/DAppVersion=*" }) -replace "^/DAppVersion=", ""'
+        '$icon = [string]($args | Where-Object { $_ -like "/DIconFile=*" }) -replace "^/DIconFile=", ""'
+        '$out = [string]($args | Where-Object { $_ -like "/O*" }) -replace "^/O", ""'
+        '$script = [string]$args[-1]'
+        'if (-not $version) { [Console]::Error.WriteLine("Error: no version"); exit 4 }'
+        'if (-not (Test-Path -LiteralPath $icon)) { [Console]::Error.WriteLine("Error: no icon at $icon"); exit 2 }'
+        'if (-not $script.EndsWith("twinbar.iss") -or -not (Test-Path -LiteralPath $script)) { [Console]::Error.WriteLine("Error: no script at $script"); exit 3 }'
+        '[IO.File]::WriteAllText((Join-Path $out "Twinbar-Setup-$version.exe"), "fake")'
+        '"Successful compile (fake)"'
+        'exit 0'
+      ) -join "`r`n") + "`r`n")
+  $installerDist = Join-Path $root 'dist with installer'
+  $r = Invoke-Cli @('-OutDir', $installerDist, '-Installer', '-Iscc', $fakeIscc) (Join-Path $repo 'tools\make-release.ps1')
+  Assert-Cli $r 0 'Successful compile' 'make-release -Installer draws the icon and runs Inno Setup'
+  Assert-True (Test-Path -LiteralPath (Join-Path $installerDist "Twinbar-Setup-$version.exe")) "with Twinbar-Setup-$version.exe as the result"
+  if (Test-Path -LiteralPath (Join-Path $installerDist 'SHA256SUMS')) {
+    Assert-True (@([IO.File]::ReadAllLines((Join-Path $installerDist 'SHA256SUMS')) | Where-Object { $_ -like "*  Twinbar-Setup-$version.exe" }).Count -eq 1) 'SHA256SUMS has the installer'
+  }
+  $failingIscc = Join-Path $root 'failing iscc.cmd'
+  [IO.File]::WriteAllText($failingIscc, "@echo off`r`necho Error on line 7 in twinbar.iss: Unknown preprocessor directive. 1>&2`r`nexit /b 2`r`n")
+  $r = Invoke-Cli @('-OutDir', (Join-Path $root 'dist failing'), '-Installer', '-Iscc', $failingIscc) (Join-Path $repo 'tools\make-release.ps1')
+  Assert-Cli $r 1 'Inno Setup failed \(exit 2\).*line 7' "a failed Inno Setup build fails make-release, with Inno Setup's error"
+
   # -------------------------------------------------------------------------
   Write-Section 'Fake apps'
   $std = Join-Path $root 'apps\Fake App'
