@@ -1,11 +1,14 @@
 // A stand-in for an Electron app, built by tests/smoke.ps1 (C# 5, Windows PowerShell's Add-Type).
-// It records how it was started in <user-data-dir>\launched.txt and exits, or waits
+// Like Electron apps, it sets its own AppUserModelID for the whole process ("Fake.App").
+// It records how it was started in <user-data-dir>\launched.txt and exits, or stays
 // while <user-data-dir>\stay.txt exists (up to 30 seconds) so tests can see it running.
+// With <user-data-dir>\window.txt it shows a window while it stays.
 using System;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Windows.Forms;
 
 [assembly: AssemblyProduct("Fake App")]
 [assembly: AssemblyTitle("Fake App")]
@@ -25,10 +28,15 @@ static class FakeApp {
   [DllImport("kernel32.dll", EntryPoint = "GetStartupInfoW")]
   static extern void GetStartupInfo(out StartupInfo info);
 
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+
   const int STARTF_TITLEISLINKNAME = 0x800;
   const int STARTF_TITLEISAPPID = 0x1000;
 
+  [STAThread]
   static int Main(string[] args) {
+    SetCurrentProcessExplicitAppUserModelID("Fake.App");
     string dataDir = null;
     foreach (string a in args) {
       if (a.StartsWith("--user-data-dir=", StringComparison.OrdinalIgnoreCase)) dataDir = a.Substring(16);
@@ -46,6 +54,19 @@ static class FakeApp {
     });
 
     string stay = Path.Combine(dataDir, "stay.txt");
+    if (File.Exists(Path.Combine(dataDir, "window.txt"))) {
+      Form form = new Form();
+      form.Text = "Fake App";
+      form.StartPosition = FormStartPosition.Manual;
+      form.SetBounds(40, 40, 360, 160);
+      int ticks = 0;
+      System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+      timer.Interval = 100;
+      timer.Tick += delegate { if (!File.Exists(stay) || ++ticks > 300) form.Close(); };
+      timer.Start();
+      Application.Run(form);
+      return 0;
+    }
     for (int i = 0; i < 300 && File.Exists(stay); i++) Thread.Sleep(100);
     return 0;
   }

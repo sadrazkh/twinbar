@@ -6,8 +6,8 @@ Twinbar is built in five phases. Each phase ends with working, tested code on
 | Phase | What you get | Status |
 |---|---|---|
 | 1 | Core command line: profiles with their own sign-in, from the Start menu | Done (0.1.0) |
-| 2 | Own icon and own taskbar button | Next |
-| 3 | Change and repair profiles; light/dark; Microsoft Store apps | Planned |
+| 2 | Own icon and own taskbar button | Done (0.2.0) |
+| 3 | Change and repair profiles; light/dark; Microsoft Store apps | Next |
 | 4 | The Twinbar app: windows and forms, no terminal needed | Planned |
 | 5 | CI, signed releases, winget/Scoop, docs | Planned |
 
@@ -38,30 +38,46 @@ Start menu entry while the original keeps its sign-in.
 ## Phase 2: own icon and own taskbar button
 
 - Recoloured icon and/or a letter badge (`-Color`, `-Badge`, `-Style`), drawn
-  with System.Drawing into a multi-size `.ico` kept with the profile.
-- A separate taskbar button. What phase 1 measured: started from its Start
-  menu shortcut, an app is told which shortcut started it
-  (`STARTF_TITLEISLINKNAME`), so Windows can apply the shortcut's ID. But most
-  Electron apps set their own AppUserModelID, which wins, and a Squirrel
-  launcher starts the real app with fresh start-up information, so the link is
-  probably lost there. Either way a profile's windows can group with the
-  original app. Plan: measure this per app, then tag the profile's windows with
-  the profile's ID (window property store) from a small hidden launcher, with
-  relaunch command and icon set so that pinning the button pins the profile,
-  not the original.
-- A fallback for apps where tagging isn't possible, documented per app.
+  with System.Drawing into a multi-size `.ico` (16 to 256 pixels) kept with the
+  profile. Below 24 pixels the badge is a plain dot.
+- A separate taskbar button, through a launcher (see below).
 
-Done when: the original and the profile show as two taskbar buttons with
-different icons, and pinning either one reopens the right one.
+What was measured first, reading each taskbar button's AppUserModelID through
+UI Automation, with Bruno 4.3 and Postman 12.33:
+
+| How the profile was started | Taskbar button |
+|---|---|
+| From a shortcut that has the profile's ID | The app's own (`com.usebruno.bruno`, `com.squirrel.Postman.Postman`) |
+| With the profile's ID passed in the start-up information | The app's own |
+| Then the profile's ID set on its windows from another process | **Its own**, straight away, no hide/show needed |
+
+So the apps' own process-wide ID wins over anything given at start-up, and an
+ID on the window wins over that. The profile's shortcut now starts
+`twinbar-launcher.exe <profile id>`: a small C# program whose source is inside
+`twinbar.ps1` and which is compiled on the user's computer. It starts the app
+with the profile's data folder, finds the app's main process (our executable,
+our `--user-data-dir`, no `--type=`, not Squirrel's launcher), and puts the
+profile's relaunch name, command and icon and then its ID on every top-level
+window of that process. It catches new windows with a WinEvent hook on that
+process plus a check every 0.4 s, gives the app 2 minutes to start and
+10 seconds to come back after it quits (apps restart to finish updates), and
+lets only one launcher look after a profile at a time (a named mutex).
+
+Done: the tests check the window's ID and the taskbar button (fake app, Bruno
+and Postman); a screenshot of Bruno's button shows the recoloured, badged icon.
+Not checked by hand yet: pinning the button and starting the profile from the
+pin (the relaunch command and icon are set for it).
 
 ## Phase 3: change and repair profiles, more apps
 
 - `change` (colour, badge, appearance; the name and data folder stay),
-  `rebuild` (repair shortcuts after an app moves or is reinstalled), `doctor`.
+  `rebuild` (repair shortcuts after an app moves or is reinstalled, and bring
+  0.1.0 profiles up to date), `doctor` (what the taskbar sees, launcher log).
 - Appearance per profile: light, dark or the same as Windows.
 - Microsoft Store (MSIX) apps such as Claude: start them through package
   activation with arguments, and keep their data outside AppData so Windows'
   per-package redirection doesn't hide it.
+- Look into giving the app's window the profile's icon too (title bar, Alt+Tab).
 
 ## Phase 4: the Twinbar app
 

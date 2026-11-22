@@ -105,7 +105,7 @@ function New-FakeExe([string] $Path) {
     $script:fakeBuilt = Join-Path $root 'build\FakeApp.exe'
     [void][IO.Directory]::CreateDirectory((Split-Path -Parent $script:fakeBuilt))
     $source = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'FakeApp.cs'))
-    Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $script:fakeBuilt -OutputType WindowsApplication
+    Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $script:fakeBuilt -OutputType WindowsApplication -ReferencedAssemblies 'System.Windows.Forms'
   }
   [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Path))
   Copy-Item -LiteralPath $script:fakeBuilt -Destination $Path
@@ -129,6 +129,62 @@ function Wait-Until([scriptblock] $Condition, [int] $Seconds) {
 function Get-ProcessesFor([string] $DataDir) {
   $script:DataDirProcesses = $null # the dot-sourced script caches the process list
   @(Get-ProfileProcesses ([pscustomobject]@{ dataDir = $DataDir }))
+}
+
+# Launchers looking after a profile (their command line ends with the profile id).
+function Get-LaunchersFor([string] $Id) {
+  @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'twinbar-launcher.exe'" |
+      Where-Object { $_.CommandLine -match ('\s' + [regex]::Escape($Id) + '\s*$') })
+}
+
+# The taskbar's buttons, by the AppUserModelID each stands for; $null when there's
+# no taskbar to ask (for example on a build server).
+function Get-TaskbarAppIds {
+  Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+  $a = [System.Windows.Automation.AutomationElement]
+  $condition = New-Object System.Windows.Automation.PropertyCondition($a::ClassNameProperty, 'Shell_TrayWnd')
+  $tray = $a::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
+  if ($null -eq $tray) { return $null }
+  $ids = @()
+  foreach ($e in $tray.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
+    if ($e.Current.AutomationId -like 'Appid:*') { $ids += $e.Current.AutomationId.Substring(6).Trim() }
+  }
+  return , $ids
+}
+
+# The images in an .ico file: size, and whether it's stored as PNG.
+function Read-IcoInfo([string] $Path) {
+  $b = [IO.File]::ReadAllBytes($Path)
+  $count = [BitConverter]::ToUInt16($b, 4)
+  $images = @()
+  for ($i = 0; $i -lt $count; $i++) {
+    $e = 6 + 16 * $i
+    $size = if ($b[$e] -eq 0) { 256 } else { [int]$b[$e] }
+    $offset = [BitConverter]::ToInt32($b, $e + 12)
+    $images += [pscustomobject]@{ Size = $size; Png = ($b[$offset] -eq 0x89 -and $b[$offset + 1] -eq 0x50) }
+  }
+  [pscustomobject]@{ Type = [BitConverter]::ToUInt16($b, 2); Images = $images }
+}
+
+# The average hue (0-360) of the clearly coloured, opaque pixels of an image.
+function Get-MainHue([string] $PngPath) {
+  Add-Type -AssemblyName System.Drawing
+  $bmp = New-Object Drawing.Bitmap $PngPath
+  try {
+    $x = 0.0; $y = 0.0
+    for ($j = 0; $j -lt $bmp.Height; $j += 4) {
+      for ($i = 0; $i -lt $bmp.Width; $i += 4) {
+        $c = $bmp.GetPixel($i, $j)
+        if ($c.A -gt 200 -and $c.GetSaturation() -gt 0.35 -and $c.GetBrightness() -gt 0.2 -and $c.GetBrightness() -lt 0.85) {
+          $x += [Math]::Cos($c.GetHue() * [Math]::PI / 180)
+          $y += [Math]::Sin($c.GetHue() * [Math]::PI / 180)
+        }
+      }
+    }
+    return (([Math]::Atan2($y, $x) * 180 / [Math]::PI) + 360) % 360
+  } finally {
+    $bmp.Dispose()
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -263,6 +319,49 @@ try {
   Assert-True (Test-ProtectedDir (Join-Path $twHome 'data')) "protected: Twinbar's data folder"
   Assert-True (-not (Test-ProtectedDir (Join-Path $twHome 'data\fakeapp\work'))) "not protected: a profile's folder"
 
+  Assert-Equal '#0090FF' (Resolve-ProfileColor 'Blue' 'x.y') 'colour: a palette name'
+  Assert-Equal '#12ABEF' (Resolve-ProfileColor '12abef' 'x.y') 'colour: hex without #'
+  Assert-Equal (Resolve-ProfileColor '' 'fakeapp.work') (Resolve-ProfileColor '' 'fakeapp.work') 'colour: the default is stable'
+  Assert-True ((Resolve-ProfileColor '' 'fakeapp.work') -ne '#6F6E77') 'colour: the default is never gray'
+  Assert-Throws { Resolve-ProfileColor 'mauve' 'x.y' } 'colour must be' 'colour: an unknown name is refused'
+  Assert-Equal 'W' (Get-BadgeText '' 'work') 'badge: first letter of the name, upper case'
+  Assert-Equal 'AB' (Get-BadgeText 'ab' 'Work') 'badge: two letters'
+  Assert-Equal ([string][char]0x06A9) (Get-BadgeText '' $persian) 'badge: a Persian name gives its first letter'
+  Assert-Throws { Get-BadgeText 'ABC' 'Work' } '1 or 2' 'badge: three letters are refused'
+  Assert-Throws { Get-BadgeText '!' 'Work' } '1 or 2' 'badge: punctuation is refused'
+  Assert-Equal 'tint+badge' (Resolve-Style '') 'style: tint+badge by default'
+  Assert-Equal 'badge' (Resolve-Style 'Badge') 'style: badge'
+  Assert-Throws { Resolve-Style 'sparkly' } 'style must be' 'style: an unknown one is refused'
+
+  # Icons, drawn from Explorer's icon (any exe with an icon would do).
+  Initialize-Interop
+  $iconDir = Join-Path $root 'icons'
+  [void][IO.Directory]::CreateDirectory($iconDir)
+  $explorer = Join-Path $env:WINDIR 'explorer.exe'
+  foreach ($look in 'tint+badge', 'tint', 'badge', 'none') {
+    $file = Join-Path $iconDir ($look.Replace('+', '-') + '.ico')
+    [TwinbarInterop.IconMaker]::Build($explorer, $file, $look, '#30A46C', 'W', [IO.Path]::ChangeExtension($file, '.png'))
+  }
+  $ico = Read-IcoInfo (Join-Path $iconDir 'tint-badge.ico')
+  Assert-Equal 1 $ico.Type 'icon: an .ico file'
+  Assert-Equal '16 20 24 32 40 48 64 256' (($ico.Images | ForEach-Object { $_.Size }) -join ' ') 'icon: sizes 16 to 256'
+  Assert-Equal 'True' (($ico.Images | Where-Object { $_.Size -eq 256 }).Png).ToString() 'icon: 256 x 256 is stored as PNG'
+  Assert-Equal 0 @($ico.Images | Where-Object { $_.Size -lt 256 -and $_.Png }).Count 'icon: the small sizes are plain bitmaps'
+  $hue = Get-MainHue (Join-Path $iconDir 'tint.png')
+  Assert-True ([Math]::Abs($hue - 151) -lt 20) 'icon: tint recolours it green' "hue $([int]$hue)"
+  $plainHue = Get-MainHue (Join-Path $iconDir 'none.png')
+  Assert-True ([Math]::Abs($plainHue - 151) -gt 20) "icon: the original isn't green" "hue $([int]$plainHue)"
+  Add-Type -AssemblyName System.Drawing
+  $b = New-Object Drawing.Bitmap (Join-Path $iconDir 'badge.png')
+  $ring = $b.GetPixel(255 - [int](256 * 0.52 * 0.045), 255 - [int](256 * 0.26))
+  $fill = $b.GetPixel(255 - [int](256 * 0.52 * 0.2), 255 - [int](256 * 0.26))
+  $b.Dispose()
+  Assert-True ($ring.R -gt 230 -and $ring.G -gt 230 -and $ring.B -gt 230) 'icon: the badge has a white ring' "$ring"
+  Assert-True ([Math]::Abs($fill.GetHue() - 151) -lt 15 -and $fill.GetSaturation() -gt 0.4) 'icon: the badge is filled with the colour' "$fill"
+  $noIcon = Join-Path $iconDir 'fake.ico'
+  [TwinbarInterop.IconMaker]::Build($stdExe, $noIcon, 'tint+badge', '#30A46C', 'W', '')
+  Assert-Equal 8 @((Read-IcoInfo $noIcon).Images).Count "icon: an app without an icon gets Windows' application icon"
+
   # -------------------------------------------------------------------------
   Write-Section 'Command line'
   Assert-Cli (Invoke-Cli @('help')) 0 'twinbar new -App' 'help'
@@ -272,21 +371,38 @@ try {
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-ShortcutDir', $menu)) 1 'profile name is required' 'new without a name fails'
   Assert-Cli (Invoke-Cli @('new', '-App', (Join-Path $plain 'FakeApp.exe'), '-Name', 'Work', '-ShortcutDir', $menu)) 1 'Electron' 'new with a non-Electron app fails'
 
-  $r = Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-ShortcutDir', $menu)
+  Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-Color', 'mauve', '-ShortcutDir', $menu)) 1 'colour must be' 'new with an unknown colour fails'
+  Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-Style', 'sparkly', '-ShortcutDir', $menu)) 1 'style must be' 'new with an unknown style fails'
+  Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-Badge', 'ABC', '-ShortcutDir', $menu)) 1 '1 or 2' 'new with a long badge fails'
+
+  $r = Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-Color', 'green', '-ShortcutDir', $menu)
   Assert-Cli $r 0 'Made "Fake App Work"' 'new Work'
+  Assert-Cli $r 0 'colour #30A46C, badge W' 'it reports the icon'
   $workLink = Join-Path $menu 'Fake App Work.lnk'
   $workData = Join-Path $twHome 'data\fakeapp\work'
+  $workIcon = Join-Path $twHome 'icons\fakeapp.work.ico'
+  $launcher = Join-Path $twHome 'bin\twinbar-launcher.exe'
+  Assert-True (Test-Path -LiteralPath $launcher) 'the launcher was built'
+  Assert-Equal "$version.0" ([Diagnostics.FileVersionInfo]::GetVersionInfo($launcher).FileVersion) "the launcher is version $version"
+  Assert-Equal 8 @((Read-IcoInfo $workIcon).Images).Count "the profile's icon was drawn"
   Assert-True (Test-Path -LiteralPath $workLink) 'the Start menu shortcut exists'
   if (Test-Path -LiteralPath $workLink) {
     $l = Read-ShellLink $workLink
-    Assert-Equal $stdExe $l.TargetPath 'shortcut: target'
-    Assert-Equal "--user-data-dir=""$workData""" $l.Arguments 'shortcut: --user-data-dir argument'
+    Assert-Equal $launcher $l.TargetPath 'shortcut: starts the launcher'
+    Assert-Equal 'fakeapp.work' $l.Arguments 'shortcut: with the profile id'
     Assert-Equal 'Twinbar.fakeapp.work' $l.AppUserModelId 'shortcut: its own AppUserModelID'
     Assert-Equal $std $l.WorkingDirectory 'shortcut: working folder'
-    Assert-Equal $stdExe $l.IconPath "shortcut: the app's icon"
+    Assert-Equal $workIcon $l.IconPath "shortcut: the profile's icon"
   }
   Assert-Equal 'fakeapp.work' ([IO.File]::ReadAllText((Join-Path $workData '.twinbar-profile'))) 'the data folder has the marker'
-  Assert-True (Test-Path -LiteralPath (Join-Path $twHome 'profiles\fakeapp.work.json')) 'the profile record exists'
+  $record = [IO.File]::ReadAllText((Join-Path $twHome 'profiles\fakeapp.work.json')) | ConvertFrom-Json
+  Assert-Equal 'tint+badge|#30A46C|W' ('{0}|{1}|{2}' -f $record.style, $record.color, $record.badge) 'the record has the look'
+  Assert-Equal $stdExe $record.launchExe 'the record has the app'
+
+  $r = Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Plain', '-Style', 'original', '-ShortcutDir', $menu)
+  Assert-Cli $r 0 "the app's own icon" 'new with -Style original'
+  Assert-Equal $stdExe (Read-ShellLink (Join-Path $menu 'Fake App Plain.lnk')).IconPath "-Style original keeps the app's icon"
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $twHome 'icons\fakeapp.plain.ico'))) '-Style original draws no icon'
 
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-ShortcutDir', $menu)) 1 'already a profile' 'the same profile twice fails'
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'WORK', '-ShortcutDir', $menu)) 1 'already a profile' 'names differing only in case clash'
@@ -296,7 +412,8 @@ try {
 
   $r = Invoke-Cli @('new', 'Home', '-App', $sqExe, '-ShortcutDir', $menu)
   Assert-Cli $r 0 'Made "Fake App Home"' 'new Home (name given first) for the Squirrel app'
-  Assert-Equal $sqExe (Read-ShellLink (Join-Path $menu 'Fake App Home.lnk')).TargetPath 'Squirrel shortcut starts the root launcher'
+  $homeRecord = [IO.File]::ReadAllText((Join-Path $twHome 'profiles\fakeapp.home.json')) | ConvertFrom-Json
+  Assert-Equal $sqExe $homeRecord.launchExe "a Squirrel app is started through Squirrel's launcher"
 
   Assert-Cli (Invoke-Cli @('new', '-App', $otherExe, '-Name', 'Home', '-ShortcutDir', $menu)) 1 'already a shortcut' "an existing shortcut isn't overwritten"
   $menu2 = Join-Path $root 'other menu'
@@ -310,31 +427,53 @@ try {
   Assert-True (Test-Path -LiteralPath (Join-Path $existing 'keep.txt')) 'adopting keeps what was there'
 
   $rows = Get-ListRows
-  Assert-Equal 4 $rows.Count 'list -Json shows 4 profiles'
+  Assert-Equal 5 $rows.Count 'list -Json shows 5 profiles'
   Assert-Equal 'ready' (@($rows | Where-Object { $_.id -eq 'fakeapp.work' })[0]).status 'Work is ready'
   Assert-Cli (Invoke-Cli @('list')) 0 'Fake App Work\s+fakeapp\.work\s+ready' 'list shows a table'
 
   # -------------------------------------------------------------------------
   Write-Section 'Opening a profile'
   [IO.File]::WriteAllText((Join-Path $workData 'stay.txt'), 'keep running')
+  [IO.File]::WriteAllText((Join-Path $workData 'window.txt'), 'show a window')
   Assert-Cli (Invoke-Cli @('open', 'Work')) 0 'Opening Fake App Work' 'open Work'
   $launched = Join-Path $workData 'launched.txt'
   Assert-True (Wait-Until { Test-Path -LiteralPath $launched } 20) 'the app started'
   if (Test-Path -LiteralPath $launched) {
-    $info = @{}
-    foreach ($line in [IO.File]::ReadAllLines($launched)) {
-      $i = $line.IndexOf('=')
-      $info[$line.Substring(0, $i)] = $line.Substring($i + 1)
-    }
-    Assert-Equal $workData $info['datadir'] 'the app got its own data folder'
-    Assert-True ($info['appid'] -eq 'Twinbar.fakeapp.work' -or $info['linkname'] -eq $workLink) 'Windows told the app which shortcut started it' ("appid='{0}' linkname='{1}'" -f $info['appid'], $info['linkname'])
-    Write-Host ("        (start info: appid='{0}', linkname='{1}')" -f $info['appid'], $info['linkname']) -ForegroundColor DarkGray
+    $datadirLine = @([IO.File]::ReadAllLines($launched) | Where-Object { $_ -like 'datadir=*' })[0]
+    Assert-Equal "datadir=$workData" $datadirLine 'the app got its own data folder'
   }
   Assert-True (Wait-Until { @(Get-ProcessesFor $workData).Count -gt 0 } 10) 'the running app is found by its data folder'
+  Assert-Equal 1 @(Get-LaunchersFor 'fakeapp.work').Count 'the launcher is looking after it'
+  $script:fakeWindow = [IntPtr]::Zero
+  $haveWindow = Wait-Until {
+    foreach ($p in @(Get-ProcessesFor $workData)) {
+      $h = ([Diagnostics.Process]::GetProcessById([int]$p.ProcessId)).MainWindowHandle
+      if ($h -ne [IntPtr]::Zero) { $script:fakeWindow = $h; return $true }
+    }
+    return $false
+  } 15
+  Assert-True $haveWindow 'the app showed its window'
+  if ($haveWindow) {
+    $tagged = Wait-Until { [TwinbarInterop.Shell]::GetWindowAppId($script:fakeWindow) -eq 'Twinbar.fakeapp.work' } 10
+    Assert-True $tagged "the window carries the profile's ID, though the app set its own" ("window ID: '{0}'" -f [TwinbarInterop.Shell]::GetWindowAppId($script:fakeWindow))
+    if ($null -eq (Get-TaskbarAppIds)) {
+      Write-Host '  skip  taskbar button (no taskbar here)'
+    } else {
+      Assert-True (Wait-Until { (Get-TaskbarAppIds) -contains 'Twinbar.fakeapp.work' } 10) 'the taskbar shows a button of its own for it'
+      Assert-True ((Get-TaskbarAppIds) -notcontains 'Fake.App') "it isn't on the app's own button"
+    }
+  }
   Assert-Equal 'running' (@(Get-ListRows | Where-Object { $_.id -eq 'fakeapp.work' })[0]).status 'list shows Work running'
   Assert-Cli (Invoke-Cli @('remove', 'Work')) 1 'running' "a running profile isn't removed"
+  Assert-Cli (Invoke-Cli @('open', 'Work')) 0 'Opening' 'opening it again while it runs'
+  Assert-True (Wait-Until { @(Get-LaunchersFor 'fakeapp.work').Count -le 1 } 10) 'still only one launcher looks after it'
   Remove-Item -LiteralPath (Join-Path $workData 'stay.txt')
   Assert-True (Wait-Until { @(Get-ProcessesFor $workData).Count -eq 0 } 15) 'the app quit'
+  Assert-True (Wait-Until { @(Get-LaunchersFor 'fakeapp.work').Count -eq 0 } 25) 'the launcher quit after the app'
+  $log = Join-Path $twHome 'logs\launcher.log'
+  $logText = if (Test-Path -LiteralPath $log) { [IO.File]::ReadAllText($log) } else { '' }
+  Assert-True ($logText -match 'fakeapp\.work: the app quit; [1-9]\d* window\(s\) tagged') 'the launcher logged what it did' $logText.Trim()
+  Remove-Item -LiteralPath (Join-Path $workData 'window.txt')
 
   # -------------------------------------------------------------------------
   Write-Section 'Removing'
@@ -343,6 +482,7 @@ try {
   $r = Invoke-Cli @('remove', 'Work')
   Assert-Cli $r 0 'Removed "Fake App Work"' 'remove Work'
   Assert-True (-not (Test-Path -LiteralPath $workLink)) 'the shortcut is gone'
+  Assert-True (-not (Test-Path -LiteralPath $workIcon)) 'the icon is gone'
   Assert-True (-not (Test-Path -LiteralPath (Join-Path $twHome 'profiles\fakeapp.work.json'))) 'the record is gone'
   Assert-True (Test-Path -LiteralPath (Join-Path $workData '.twinbar-profile')) 'the sign-in data is kept'
   Assert-Cli (Invoke-Cli @('new', '-App', $stdExe, '-Name', 'Work', '-ShortcutDir', $menu)) 0 'kept from before' 'making it again reuses the kept data'
@@ -356,6 +496,7 @@ try {
   Assert-True (Test-Path -LiteralPath (Join-Path $existing 'keep.txt')) 'the adopted data is kept'
   Assert-Cli (Invoke-Cli @('remove', 'fakeapp.home', '-DeleteData')) 0 'Removed' 'remove by id'
   Assert-Cli (Invoke-Cli @('remove', 'otherapp.home', '-DeleteData')) 0 'Removed' 'remove the second app'
+  Assert-Cli (Invoke-Cli @('remove', 'fakeapp.plain', '-DeleteData')) 0 'Removed' 'remove the plain one'
   Assert-Cli (Invoke-Cli @('list')) 0 'No profiles yet' 'no profiles left'
 
   # -------------------------------------------------------------------------
@@ -367,9 +508,11 @@ try {
     if ($r.Code -eq 0 -and $rec.Count -eq 1) {
       $rec = $rec[0]
       $l = Read-ShellLink $rec.shortcut
-      Write-Host ("        {0} ({1}): starts {2}" -f $rec.fullName, $rec.appKind, $l.TargetPath) -ForegroundColor DarkGray
-      Assert-True (Test-Path -LiteralPath $l.TargetPath) 'the shortcut starts an existing program'
-      Assert-Equal "--user-data-dir=""$($rec.dataDir)""" $l.Arguments 'the shortcut passes the data folder'
+      $full = [IO.File]::ReadAllText((Join-Path $twHome "profiles\$($rec.id).json")) | ConvertFrom-Json
+      Write-Host ("        {0} ({1}): starts {2}" -f $rec.fullName, $rec.appKind, $full.launchExe) -ForegroundColor DarkGray
+      Assert-True (Test-Path -LiteralPath $full.launchExe) 'the profile starts an existing program'
+      Assert-Equal $rec.id $l.Arguments 'the shortcut starts the launcher with the profile id'
+      Assert-Equal 8 @((Read-IcoInfo $rec.icon).Images).Count "the app's icon was redrawn"
       if ($Launch) {
         Assert-Cli (Invoke-Cli @('open', $rec.id)) 0 'Opening' 'open it'
         Assert-True (Wait-Until { @(Get-ChildItem -LiteralPath $rec.dataDir -Force | Where-Object { $_.Name -ne '.twinbar-profile' }).Count -ge 2 } 60) 'the app keeps its data in the profile folder'
@@ -378,8 +521,15 @@ try {
         $realExe = (Resolve-ElectronApp $RealApp).RealExe
         Assert-True (@($procs | Where-Object { $_.ExecutablePath -ieq $realExe }).Count -gt 0) "the Electron exe itself got the folder ($realExe)"
         Assert-Equal 'running' (@(Get-ListRows | Where-Object { $_.id -eq $rec.id })[0]).status 'list shows it running'
+        if ($null -eq (Get-TaskbarAppIds)) {
+          Write-Host '  skip  taskbar button (no taskbar here)'
+        } else {
+          Assert-True (Wait-Until { (Get-TaskbarAppIds) -contains $rec.aumid } 30) "the taskbar shows a button of its own ($($rec.aumid))"
+        }
+        $procs = @(Get-ProcessesFor $rec.dataDir)
         $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Assert-True (Wait-Until { @(Get-ProcessesFor $rec.dataDir).Count -eq 0 } 20) 'closed it again'
+        Assert-True (Wait-Until { @(Get-LaunchersFor $rec.id).Count -eq 0 } 25) 'the launcher quit after the app'
         Start-Sleep -Seconds 1 # let Windows release the files
       }
       Assert-Cli (Invoke-Cli @('remove', $rec.id, '-DeleteData')) 0 'Removed' 'remove it with its data'
