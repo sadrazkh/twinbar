@@ -6,6 +6,32 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-23
+
+VS Code's new layout, and a straight answer about Antigravity.
+
+### Added
+
+- VS Code 1.10x and later (and editors that follow its layout): `Code.exe`
+  stays in the install folder while Electron's files move to a version folder
+  beside it (`<install>\<commit>\resources\app`), so Twinbar said it wasn't an
+  Electron app. It now finds the app there too, from the `.exe`, the folder
+  or the Start menu, and `twinbar apps` lists it.
+- Making a profile of VS Code or an editor built on it says that its
+  extensions are shared with the main app (they live in
+  `%USERPROFILE%\.vscode\extensions` and the like, whatever the data folder),
+  and how to give it extensions of its own:
+  `-AppArgs '--extensions-dir "<a folder>"'`. Its sign-in, settings and
+  history are its own.
+
+### Changed
+
+- Antigravity (Google's agent app) is refused, saying why: it keeps your
+  Google sign-in in Windows Credential Manager (`gemini:antigravity`) and its
+  agent's data in `%USERPROFILE%\.gemini\antigravity`, which every copy
+  shares, so a twin was signed in to the same account. Antigravity IDE can
+  still be twinned; Twinbar says its agent's data is shared.
+
 ## [0.10.1] - 2026-11-23
 
 ### Fixed

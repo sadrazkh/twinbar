@@ -42,7 +42,7 @@ $runKey = "$runKeyRoot\Run"
 $script:passed = 0
 $script:failed = 0
 $script:fakeBuilt = $null
-$script:fakeTelegram = $null
+$script:fakeByProduct = @{} # the fake app built under other product names
 $script:extraEnv = @{} # more environment variables for Invoke-Cli
 
 # ---------------------------------------------------------------------------
@@ -140,17 +140,23 @@ function New-FakeExe([string] $Path) {
   Copy-Item -LiteralPath $script:fakeBuilt -Destination $Path
 }
 
+# The fake app built with another product name, the name Windows reads from the .exe.
+function New-FakeExeAs([string] $Path, [string] $Product) {
+  if (-not $script:fakeByProduct.ContainsKey($Product)) {
+    $built = Join-Path $root ('build\product-' + ($Product -replace '[^A-Za-z0-9]', '') + '.exe')
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $built))
+    $source = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'FakeApp.cs')).Replace('AssemblyProduct("Fake App")', "AssemblyProduct(""$Product"")").Replace('AssemblyTitle("Fake App")', "AssemblyTitle(""$Product"")")
+    Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $built -OutputType WindowsApplication -ReferencedAssemblies 'System.Windows.Forms'
+    $script:fakeByProduct[$Product] = $built
+  }
+  [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Path))
+  Copy-Item -LiteralPath $script:fakeByProduct[$Product] -Destination $Path
+}
+
 # A stand-in for Telegram Desktop: the fake app built as Telegram.exe with Telegram's
 # product name, in a folder with an updater and an uninstaller next to it.
 function New-FakeTelegram([string] $Dir) {
-  if (-not $script:fakeTelegram) {
-    $script:fakeTelegram = Join-Path $root 'build\Telegram.exe'
-    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $script:fakeTelegram))
-    $source = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'FakeApp.cs')).Replace('AssemblyProduct("Fake App")', 'AssemblyProduct("Telegram Desktop")').Replace('AssemblyTitle("Fake App")', 'AssemblyTitle("Telegram Desktop")')
-    Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $script:fakeTelegram -OutputType WindowsApplication -ReferencedAssemblies 'System.Windows.Forms'
-  }
-  [void][IO.Directory]::CreateDirectory($Dir)
-  Copy-Item -LiteralPath $script:fakeTelegram -Destination (Join-Path $Dir 'Telegram.exe')
+  New-FakeExeAs (Join-Path $Dir 'Telegram.exe') 'Telegram Desktop'
   foreach ($other in 'Updater.exe', 'unins000.exe') { [IO.File]::WriteAllText((Join-Path $Dir $other), 'stand-in') }
 }
 
@@ -566,6 +572,30 @@ try {
   New-FakeExe (Join-Path $cefDir 'Some.exe')
   [IO.File]::WriteAllText((Join-Path $cefDir 'libcef.dll'), 'stand-in')
   Assert-Throws { Resolve-ElectronApp (Join-Path $cefDir 'Some.exe') } 'built on CEF' 'a CEF app is refused, saying why'
+
+  # VS Code's layout since 1.10x: Code.exe in the install folder, Electron's files
+  # in a version folder beside it.
+  $versioned = Join-Path $root 'apps\Versioned Code'
+  New-FakeExe (Join-Path $versioned 'Code.exe')
+  $commitDir = Join-Path $versioned '8a14f0cc1b'
+  [void][IO.Directory]::CreateDirectory((Join-Path $commitDir 'resources\app'))
+  [IO.File]::WriteAllText((Join-Path $commitDir 'resources\app\package.json'), '{"name": "code"}')
+  [IO.File]::WriteAllText((Join-Path $commitDir 'resources\app\product.json'), '{"dataFolderName": ".vscode-fake"}')
+  [IO.File]::WriteAllText((Join-Path $commitDir 'resources.pak'), 'stand-in')
+  $vApp = Resolve-ElectronApp (Join-Path $versioned 'Code.exe')
+  Assert-Equal ('standard|' + (Join-Path $versioned 'Code.exe')) ('{0}|{1}' -f $vApp.Kind, $vApp.RealExe) "VS Code's new layout: the app in a version folder beside the .exe"
+  Assert-Equal 'standard' (Resolve-ElectronApp $versioned).Kind 'and from its install folder'
+  $vNotes = @(Get-FamilyNotes ([ordered]@{ family = 'electron'; appKind = 'standard'; realExe = $vApp.RealExe; appName = 'Fake App'; id = 'code.work' })) -join ' '
+  Assert-True ($vNotes -match '\.vscode-fake\\extensions' -and $vNotes -match '--extensions-dir') 'VS Code and its kin: new says the extensions are shared, and how to have its own' $vNotes
+  Remove-Item -LiteralPath (Join-Path $commitDir 'resources.pak')
+  Assert-Throws { Resolve-ElectronApp (Join-Path $versioned 'Code.exe') } "doesn't look like an Electron app" "a version folder counts only with Electron's own files in it"
+
+  # Antigravity keeps its sign-in in Windows Credential Manager: a twin would share it.
+  $agDir = Join-Path $root 'apps\Antigravity'
+  New-FakeExeAs (Join-Path $agDir 'Antigravity.exe') 'Antigravity'
+  [void][IO.Directory]::CreateDirectory((Join-Path $agDir 'resources'))
+  [IO.File]::WriteAllText((Join-Path $agDir 'resources\app.asar'), 'stand-in')
+  Assert-Throws { Resolve-ElectronApp (Join-Path $agDir 'Antigravity.exe') } 'gemini:antigravity' 'Antigravity is refused: every copy shares its sign-in'
   $optionsDir = Join-Path $root 'telegram options'
   Set-TelegramOptions $optionsDir
   $optionsFile = Join-Path $optionsDir 'tdata\experimental_options.json'

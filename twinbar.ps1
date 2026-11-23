@@ -66,7 +66,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.10.1'
+$script:TwinbarVersion = '0.11.0'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
@@ -2361,6 +2361,21 @@ function Set-TelegramOptions([string] $DataDir) {
 function Get-FamilyNotes($Record) {
   if ($Record.family -eq 'telegram') {
     "Telegram: links (tg://) keep opening in your main Telegram. In this profile, leave Settings > Advanced > 'Launch Telegram when system starts' off: it would replace your main Telegram's start-up entry."
+    return
+  }
+  # VS Code and the editors built on it keep extensions in %USERPROFILE%\<dataFolderName>,
+  # whatever the data folder: shared with the main app unless asked otherwise.
+  $appDir = if ($Record.appKind -ne 'store' -and $Record.realExe -and (Test-Path -LiteralPath $Record.realExe)) { Get-ElectronAppDir $Record.realExe }
+  $productFile = if ($appDir) { Join-Path $appDir 'resources\app\product.json' }
+  if ($productFile -and (Test-Path -LiteralPath $productFile -PathType Leaf)) {
+    $folder = ''
+    try { $folder = "$(Get-RecordValue ([IO.File]::ReadAllText($productFile) | ConvertFrom-Json) 'dataFolderName')" } catch { Write-Verbose "can't read $productFile" }
+    if ($folder -match '^\.?[A-Za-z0-9_-]+$') {
+      "Extensions: this profile uses the same ones as your main $($Record.appName) (%USERPROFILE%\$folder\extensions). For extensions of its own: twinbar change $($Record.id) -AppArgs '--extensions-dir ""<a folder>""'"
+    }
+  }
+  if ($Record.appName -eq 'Antigravity IDE') {
+    "Antigravity IDE keeps its agent's data (conversations, its daemon) in %USERPROFILE%\.gemini\antigravity-ide, which every copy shares; its Google sign-in may be shared too."
   }
 }
 
@@ -2485,9 +2500,44 @@ function Test-IsStoreAppPath([string] $Path) {
   return ($Path -match '\\WindowsApps\\')
 }
 
-function Test-ElectronDir([string] $Dir) {
+function Test-ElectronFiles([string] $Dir) {
   return ((Test-Path -LiteralPath (Join-Path $Dir 'resources\app.asar') -PathType Leaf) -or
     (Test-Path -LiteralPath (Join-Path $Dir 'resources\app\package.json') -PathType Leaf))
+}
+
+# Electron's files are next to the app's .exe; or, since VS Code 1.10x, in a
+# version folder beside it (<install>\<commit>\resources\app, with Chromium's
+# resources.pak), while the .exe stays in the install folder. A Squirrel install
+# (Update.exe) is different: its app-<version> folders hold whole copies of the app.
+function Get-VersionedAppDir([string] $Dir) {
+  # .NET calls, not cmdlets: this runs for every Start menu shortcut's folder.
+  if (-not $Dir -or [IO.File]::Exists([IO.Path]::Combine($Dir, 'Update.exe'))) { return $null }
+  try { $subs = [IO.Directory]::GetDirectories($Dir) } catch { return $null }
+  foreach ($sub in $subs) {
+    if ([IO.File]::Exists([IO.Path]::Combine($sub, 'resources.pak')) -and
+      ([IO.File]::Exists([IO.Path]::Combine($sub, 'resources\app.asar')) -or [IO.File]::Exists([IO.Path]::Combine($sub, 'resources\app\package.json')))) {
+      return $sub
+    }
+  }
+  return $null
+}
+
+function Test-ElectronDir([string] $Dir) {
+  return ((Test-ElectronFiles $Dir) -or [bool](Get-VersionedAppDir $Dir))
+}
+
+# The folder with the app's resources (resources\app), next to the .exe or in its
+# version folder.
+function Get-ElectronAppDir([string] $Exe) {
+  $dir = Split-Path -Parent $Exe
+  if (Test-ElectronFiles $dir) { return $dir }
+  return (Get-VersionedAppDir $dir)
+}
+
+# Apps that keep the sign-in outside the data folder a profile gets, so every copy
+# is signed in to the same account (by the product name in the .exe's version info).
+$script:SharedSignInApps = @{
+  'Antigravity' = "Antigravity keeps your Google sign-in in Windows Credential Manager (gemini:antigravity) and its agent's data in %USERPROFILE%\.gemini\antigravity, outside the data folder Twinbar gives it; every copy shares them, so a twin would be signed in to the same account"
 }
 
 # Telegram Desktop from telegram.org (Qt, not Electron): Telegram.exe whose version
@@ -2629,6 +2679,8 @@ function Resolve-ElectronApp([string] $Path) {
     $real = $p
   }
   if (-not $kind) { Stop-Twinbar (Get-UnsupportedReason $p) }
+  $product = "$([Diagnostics.FileVersionInfo]::GetVersionInfo($real).ProductName)".Trim()
+  if ($script:SharedSignInApps.ContainsKey($product)) { Stop-Twinbar $script:SharedSignInApps[$product] }
 
   if (-not $displayName) {
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($real)

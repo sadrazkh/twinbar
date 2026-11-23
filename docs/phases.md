@@ -303,6 +303,23 @@ with the installed Telegram:
   allows that) and deleted once it quits; `open` checks the launcher first,
   and a launcher refuses a profile kind it doesn't know.
 
+## Phase 10: VS Code's new layout, and apps that share their sign-in (0.11.0)
+
+- VS Code 1.10x and later keep `Code.exe` in the install folder and Electron's
+  files in a version folder beside it (`<commit>\resources\app`, with
+  `resources.pak` and a `version` file holding Electron's version). Twinbar
+  looks there when there's nothing next to the `.exe`; a Squirrel install
+  (`Update.exe`) is left to its own rules. The look uses .NET calls, since it
+  runs for every Start menu shortcut: finding apps went from 1.0 s to
+  1.3 s on the test PC, rather than 3.5 s with cmdlets.
+- Editors built on VS Code keep extensions in `%USERPROFILE%\<dataFolderName>`
+  from `product.json`, whatever the data folder; `new` says so.
+- Antigravity 2.34 stores the Google sign-in with its Go language server in
+  Windows Credential Manager (`danieljoos/wincred`, target
+  `gemini:antigravity`) and its agent's data in `%USERPROFILE%\.gemini\antigravity`;
+  a twin with its own `--user-data-dir` came up signed in to the same
+  account. No setting moves either, so it's refused by its product name.
+
 ## Not planned
 
 - macOS or Linux. On a Mac, use [DoppelDock](https://github.com/ZarinLab/doppeldock),

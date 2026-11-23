@@ -34,7 +34,8 @@ the same time. Microsoft Store apps such as Claude work too.
   from telegram.org (see [Telegram](#telegram)). For other apps Twinbar says
   why it can't twin them: Chromium browsers have profiles of their own, and
   apps built on CEF (Steam, Spotify) or most other frameworks have no way to
-  be given a second data folder.
+  be given a second data folder. Antigravity is refused too: it keeps its
+  sign-in outside its data folder (see [Limitations](#limitations)).
 
 ## Get it
 
@@ -351,6 +352,16 @@ data folder is only ever removed if it carries that profile's marker.
 
 ## Limitations
 
+- **VS Code and editors built on it** (Cursor, Antigravity IDE...) keep
+  extensions in `%USERPROFILE%\.vscode\extensions` (or `.cursor`, ...)
+  whatever the data folder, so a twin shares your extensions; its sign-in,
+  settings and history are its own. For extensions of its own, give it
+  `-AppArgs '--extensions-dir "<a folder>"'`.
+- **Antigravity** (Google's agent app) keeps your Google sign-in in Windows
+  Credential Manager (`gemini:antigravity`) and its agent's data in
+  `%USERPROFILE%\.gemini\antigravity`, so every copy would be signed in to
+  the same account; Twinbar refuses it. Antigravity IDE can be twinned, but
+  its agent's data (`%USERPROFILE%\.gemini\antigravity-ide`) is shared.
 - **Shared storage:** data an app keeps outside its data folder is shared
   between profiles, for example passwords some apps store in Windows
   Credential Manager, or settings in the registry. Of the apps tested, Bruno,
