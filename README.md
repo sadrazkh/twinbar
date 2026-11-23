@@ -336,7 +336,7 @@ quits after it closes.
 | | |
 |---|---|
 | Start menu entry | `Start Menu\Programs\Twinbar\<App> <Name>.lnk`. It starts the launcher with the profile's id and carries the profile's AppUserModelID (`Twinbar.<app>.<name>`). |
-| Launcher | `%APPDATA%\Twinbar\bin\twinbar-launcher.exe`, compiled on your computer from the source inside `twinbar.ps1` the first time it's needed, and again after a Twinbar update. Its log is `%APPDATA%\Twinbar\logs\launcher.log`. |
+| Launcher | `%APPDATA%\Twinbar\bin\twinbar-launcher.exe`, compiled on your computer from the source inside `twinbar.ps1` the first time it's needed, and again after a Twinbar update (even while a profile is open: the running one is moved aside and deleted once it quits). Its log is `%APPDATA%\Twinbar\logs\launcher.log`. |
 | Icons | `%APPDATA%\Twinbar\icons\<app>.<name>-<hash>.ico`, drawn from the app's own icon, 16 to 256 pixels. The name changes with the look, so Windows never shows a stale icon. |
 | Profile data | `%APPDATA%\Twinbar\data\<app>\<name>\`, with a small `.twinbar-profile` marker file |
 | Profile records | `%APPDATA%\Twinbar\profiles\<app>.<name>.json` |

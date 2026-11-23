@@ -808,9 +808,32 @@ try {
   Assert-Cli (Invoke-Cli @('doctor', 'Work')) 0 'running, looked after by the launcher' 'doctor sees it running'
   Assert-Cli (Invoke-Cli @('open', 'Work')) 0 'Opening' 'opening it again while it runs'
   Assert-True (Wait-Until { @(Get-LaunchersFor 'fakeapp.work').Count -le 1 } 10) 'still only one launcher looks after it'
+
+  # A new Twinbar replaces the launcher even while an open profile's launcher runs
+  # from it: Windows won't overwrite a running program's file, but lets it be renamed.
+  # (0.10.0 kept the old launcher then, which started Telegram as an Electron app,
+  # and the main Telegram came forward instead of the twin.)
+  $launcherFile = Join-Path $twHome "bin\$($script:LauncherName)"
+  $thisVersion = $script:TwinbarVersion
+  try {
+    $script:TwinbarVersion = '0.0.1'
+    Assert-Equal $launcherFile (Initialize-Launcher) 'launcher: a new one is built while the old one runs'
+  } finally {
+    $script:TwinbarVersion = $thisVersion
+  }
+  Assert-Equal '0.0.1.0' ([Diagnostics.FileVersionInfo]::GetVersionInfo($launcherFile).FileVersion) 'launcher: the new one takes its place'
+  Assert-Equal 1 @(Get-LaunchersFor 'fakeapp.work').Count 'launcher: the running one carries on'
+  $asideFilter = "$($script:LauncherName).*.old"
+  Assert-Equal 1 @(Get-ChildItem -LiteralPath (Split-Path -Parent $launcherFile) -Filter $asideFilter).Count 'launcher: from its file, moved aside'
+  [void](Initialize-Launcher)
+  Assert-Equal "$thisVersion.0" ([Diagnostics.FileVersionInfo]::GetVersionInfo($launcherFile).FileVersion) 'launcher: and back to this version'
+
   Remove-Item -LiteralPath (Join-Path $workData 'stay.txt')
   Assert-True (Wait-Until { @(Get-ProcessesFor $workData).Count -eq 0 } 15) 'the app quit'
   Assert-True (Wait-Until { @(Get-LaunchersFor 'fakeapp.work').Count -eq 0 } 25) 'the launcher quit after the app'
+  # Windows may take a moment to let go of its file.
+  $asideGone = Wait-Until { [void](Initialize-Launcher); @(Get-ChildItem -LiteralPath (Split-Path -Parent $launcherFile) -Filter $asideFilter).Count -eq 0 } 10
+  Assert-True $asideGone 'launcher: the moved-aside one is deleted once it has quit'
   $log = Join-Path $twHome 'logs\launcher.log'
   $logText = if (Test-Path -LiteralPath $log) { [IO.File]::ReadAllText($log) } else { '' }
   Assert-True ($logText -match 'fakeapp\.work: the app quit; [1-9]\d* window\(s\) tagged') 'the launcher logged what it did' $logText.Trim()

@@ -66,7 +66,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.10.0'
+$script:TwinbarVersion = '0.10.1'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
@@ -1145,6 +1145,10 @@ namespace TwinbarLauncher {
       displayName = Text(record, "appName") + " " + Text(record, "name");
       iconFile = Text(record, "icon");
       iconResource = (iconFile.Length > 0 ? iconFile : launchExe) + ",0";
+      // A kind of app this launcher doesn't know would be started the wrong way.
+      if (family.Length > 0 && family != "electron" && family != "telegram") {
+        throw new InvalidOperationException(displayName + " needs a newer launcher. Open Twinbar once, or run: twinbar rebuild -All");
+      }
       relaunchCommand = "\"" + Assembly.GetExecutingAssembly().Location + "\" " + profileId;
       dataDirArgument = new Regex("--user-data-dir=\"?" + Regex.Escape(dataDir) + "\"?(?=\\s|$)", RegexOptions.IgnoreCase);
       // A Store app's folder changes with every update; Windows finds it by its package.
@@ -1456,9 +1460,23 @@ namespace TwinbarLauncher {
 
 function Get-LauncherPath { Join-Path (Join-Path (Get-TwinbarHome) 'bin') $script:LauncherName }
 
-# Builds the launcher if it's missing or from another Twinbar version.
+# Launchers moved aside while they ran (see Initialize-Launcher), deleted once
+# nothing runs from them any more.
+function Remove-OldLaunchers([string] $Path) {
+  $pattern = [IO.Path]::GetFileName($Path) + '.*.old'
+  foreach ($old in @(Get-ChildItem -LiteralPath (Split-Path -Parent $Path) -Filter $pattern -File -ErrorAction SilentlyContinue)) {
+    try { Remove-Item -LiteralPath $old.FullName -Force -ErrorAction Stop } catch { Write-Verbose "$($old.Name) is still in use" }
+  }
+}
+
+# Builds the launcher if it's missing or from another Twinbar version. An open
+# profile's launcher holds its file, and Windows doesn't let a running program's
+# file be replaced, but it does let it be renamed: so the running one is moved
+# aside (it carries on from there) and the new one takes its place. Every profile
+# then starts with the new launcher, which a new kind of app (Telegram) needs.
 function Initialize-Launcher {
   $path = Get-LauncherPath
+  if (Test-Path -LiteralPath (Split-Path -Parent $path)) { Remove-OldLaunchers $path }
   $want = "$($script:TwinbarVersion).0"
   if ((Test-Path -LiteralPath $path -PathType Leaf) -and
     [Diagnostics.FileVersionInfo]::GetVersionInfo($path).FileVersion -eq $want) {
@@ -1471,12 +1489,20 @@ function Initialize-Launcher {
   try {
     Move-Item -LiteralPath $tmp -Destination $path -Force
   } catch {
-    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $path) {
-      Write-Warning "couldn't update $path while a profile is open; the older launcher keeps working"
-      return $path
+    $aside = "$path.$PID.old"
+    try {
+      Move-Item -LiteralPath $path -Destination $aside -Force
+    } catch {
+      Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+      throw "couldn't update the launcher ${path}: $($_.Exception.Message)"
     }
-    throw
+    try {
+      Move-Item -LiteralPath $tmp -Destination $path -Force
+    } catch {
+      Move-Item -LiteralPath $aside -Destination $path -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+      throw
+    }
   }
   return $path
 }
@@ -1763,7 +1789,8 @@ function Invoke-Install([string] $Folder, [string] $MenuDir, [switch] $OnPath) {
   Copy-Item -LiteralPath (Get-AppIconPath) -Destination (Join-Path $target 'twinbar.ico') -Force
   New-AppHost (Join-Path $target 'Twinbar.exe') (Join-Path $target 'twinbar.ico')
   [IO.File]::WriteAllText($marker, $script:TwinbarVersion, $script:Utf8NoBom)
-  [void](Initialize-Launcher)
+  # Opening a profile tries again, so this doesn't stop the install.
+  try { [void](Initialize-Launcher) } catch { Write-Warning "$($_.Exception.Message)" }
 
   $menu = if ($MenuDir) { Resolve-FullPath $MenuDir } else { Get-DefaultShortcutDir }
   $shortcut = Join-Path $menu 'Twinbar.lnk'
@@ -3340,6 +3367,8 @@ function Invoke-List([switch] $AsJson) {
 function Invoke-Open([string] $Which) {
   $p = Find-Profile $Which
   $launcher = Get-RecordValue $p 'launcher'
+  # The shortcut starts the launcher: make sure it's this Twinbar's.
+  if ($launcher -ieq (Get-LauncherPath)) { [void](Initialize-Launcher) }
   if (Test-Path -LiteralPath $p.shortcut -PathType Leaf) {
     Start-Process -FilePath $p.shortcut
   } elseif ($launcher -and (Test-Path -LiteralPath $launcher -PathType Leaf)) {

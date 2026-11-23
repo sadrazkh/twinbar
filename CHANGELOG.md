@@ -6,6 +6,21 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-23
+
+### Fixed
+
+- A Telegram profile opened the main Telegram instead of its own. Updating
+  Twinbar while a profile was open (Claude, say) left the older launcher in
+  place, because Windows doesn't let a running program's file be replaced;
+  that launcher didn't know Telegram and started it the Electron way, which
+  Telegram hands over to the copy that's already running. Twinbar now moves
+  the running launcher's file aside (Windows allows renaming it), puts the
+  new one in its place, and deletes the old one once it has quit. Opening a
+  profile also makes sure the launcher is this Twinbar's.
+- A launcher that meets a kind of profile it doesn't know now says so,
+  instead of starting the app the wrong way.
+
 ## [0.10.0] - 2026-11-23
 
 Telegram Desktop, the first app that isn't built on Electron.

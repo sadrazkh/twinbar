@@ -296,6 +296,12 @@ with the installed Telegram:
 - Tests: the fake app built as `Telegram.exe` with Telegram's product name,
   accepting `-workdir`; `-RealApp` with the real Telegram checks that the
   `tg://` handler is the same afterwards.
+- 0.10.1: updating Twinbar while a profile was open left the 0.9.0 launcher
+  in place (Windows won't overwrite a running program's file), and it started
+  Telegram with `--user-data-dir`, which Telegram passed to the running main
+  copy. The launcher's file is now renamed aside while it runs (Windows
+  allows that) and deleted once it quits; `open` checks the launcher first,
+  and a launcher refuses a profile kind it doesn't know.
 
 ## Not planned
 
