@@ -34,8 +34,9 @@ the same time. Microsoft Store apps such as Claude work too.
   from telegram.org (see [Telegram](#telegram)). For other apps Twinbar says
   why it can't twin them: Chromium browsers have profiles of their own, and
   apps built on CEF (Steam, Spotify) or most other frameworks have no way to
-  be given a second data folder. Antigravity is refused too: it keeps its
-  sign-in outside its data folder (see [Limitations](#limitations)).
+  be given a second data folder. Antigravity and Antigravity IDE are refused
+  too: they keep their sign-in outside the data folder (see
+  [Limitations](#limitations)).
 
 ## Get it
 
@@ -352,16 +353,23 @@ data folder is only ever removed if it carries that profile's marker.
 
 ## Limitations
 
-- **VS Code and editors built on it** (Cursor, Antigravity IDE...) keep
-  extensions in `%USERPROFILE%\.vscode\extensions` (or `.cursor`, ...)
-  whatever the data folder, so a twin shares your extensions; its sign-in,
-  settings and history are its own. For extensions of its own, give it
-  `-AppArgs '--extensions-dir "<a folder>"'`.
+- **VS Code and editors built on it** (Cursor, Windsurf...) keep extensions
+  in `%USERPROFILE%\.vscode\extensions` (or `.cursor`, ...) whatever the data
+  folder, so a twin shares your extensions. For extensions of its own, give
+  it `-AppArgs '--extensions-dir "<a folder>"'`. Its GitHub and Microsoft
+  sign-ins, settings and history are its own, and so is the state VS Code
+  1.14x keeps in `%USERPROFILE%\.vscode-shared` (Twinbar passes
+  `--shared-data-dir`). Claude Code and Codex keep their sign-in in
+  `%USERPROFILE%\.claude` and `.codex`; a twin gives them folders of its own
+  (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), so they sign in separately and start
+  without your settings. Other extensions that keep a sign-in in your user
+  folder share it.
 - **Antigravity** (Google's agent app) keeps your Google sign-in in Windows
   Credential Manager (`gemini:antigravity`) and its agent's data in
   `%USERPROFILE%\.gemini\antigravity`, so every copy would be signed in to
-  the same account; Twinbar refuses it. Antigravity IDE can be twinned, but
-  its agent's data (`%USERPROFILE%\.gemini\antigravity-ide`) is shared.
+  the same account; Twinbar refuses it. **Antigravity IDE** is refused for
+  the same reason: its editor signs in per data folder, but its agent uses
+  that same sign-in and folder.
 - **Shared storage:** data an app keeps outside its data folder is shared
   between profiles, for example passwords some apps store in Windows
   Credential Manager, or settings in the registry. Of the apps tested, Bruno,

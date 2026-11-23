@@ -580,15 +580,26 @@ try {
   $commitDir = Join-Path $versioned '8a14f0cc1b'
   [void][IO.Directory]::CreateDirectory((Join-Path $commitDir 'resources\app'))
   [IO.File]::WriteAllText((Join-Path $commitDir 'resources\app\package.json'), '{"name": "code"}')
-  [IO.File]::WriteAllText((Join-Path $commitDir 'resources\app\product.json'), '{"dataFolderName": ".vscode-fake"}')
+  [IO.File]::WriteAllText((Join-Path $commitDir 'resources\app\product.json'), '{"dataFolderName": ".vscode-fake", "sharedDataFolderName": ".vscode-fake-shared"}')
   [IO.File]::WriteAllText((Join-Path $commitDir 'resources.pak'), 'stand-in')
   $vApp = Resolve-ElectronApp (Join-Path $versioned 'Code.exe')
   Assert-Equal ('standard|' + (Join-Path $versioned 'Code.exe')) ('{0}|{1}' -f $vApp.Kind, $vApp.RealExe) "VS Code's new layout: the app in a version folder beside the .exe"
   Assert-Equal 'standard' (Resolve-ElectronApp $versioned).Kind 'and from its install folder'
-  $vNotes = @(Get-FamilyNotes ([ordered]@{ family = 'electron'; appKind = 'standard'; realExe = $vApp.RealExe; appName = 'Fake App'; id = 'code.work' })) -join ' '
+  $vRecord = [ordered]@{ family = 'electron'; appKind = 'standard'; realExe = $vApp.RealExe; appName = 'Fake App'; id = 'code.work'; dataDir = 'C:\d\work'; userArgs = ''; extraArgs = '--force-dark-mode' }
+  $vNotes = @(Get-FamilyNotes $vRecord) -join ' '
   Assert-True ($vNotes -match '\.vscode-fake\\extensions' -and $vNotes -match '--extensions-dir') 'VS Code and its kin: new says the extensions are shared, and how to have its own' $vNotes
+  Assert-True ($vNotes -match 'Claude Code and Codex') 'and that Claude Code and Codex sign in on their own' $vNotes
+  Set-CodeEditorFolders $vRecord
+  Assert-Equal '--shared-data-dir="C:\d\work\shared-data" --force-dark-mode|CLAUDE_CONFIG_DIR=C:\d\work\claude;CODEX_HOME=C:\d\work\codex' ('{0}|{1}' -f $vRecord.extraArgs, $vRecord.appEnv) "a VS Code twin: VS Code's shared data, Claude Code and Codex in its own folder"
+  $vRecord.userArgs = '--shared-data-dir="C:\elsewhere"'; $vRecord.extraArgs = '--shared-data-dir="C:\elsewhere"'
+  Set-CodeEditorFolders $vRecord
+  Assert-Equal '--shared-data-dir="C:\elsewhere"' $vRecord.extraArgs "the profile's own --shared-data-dir wins"
+  $plainRecord = [ordered]@{ family = 'electron'; appKind = 'standard'; realExe = $stdExe; dataDir = 'C:\d\x'; userArgs = ''; extraArgs = ''; appEnv = 'stale' }
+  Set-CodeEditorFolders $plainRecord
+  Assert-Equal '|' ('{0}|{1}' -f $plainRecord.extraArgs, $plainRecord.appEnv) 'other apps get neither'
   Remove-Item -LiteralPath (Join-Path $commitDir 'resources.pak')
   Assert-Throws { Resolve-ElectronApp (Join-Path $versioned 'Code.exe') } "doesn't look like an Electron app" "a version folder counts only with Electron's own files in it"
+  [IO.File]::WriteAllText((Join-Path $commitDir 'resources.pak'), 'stand-in')
 
   # Antigravity keeps its sign-in in Windows Credential Manager: a twin would share it.
   $agDir = Join-Path $root 'apps\Antigravity'
@@ -596,6 +607,26 @@ try {
   [void][IO.Directory]::CreateDirectory((Join-Path $agDir 'resources'))
   [IO.File]::WriteAllText((Join-Path $agDir 'resources\app.asar'), 'stand-in')
   Assert-Throws { Resolve-ElectronApp (Join-Path $agDir 'Antigravity.exe') } 'gemini:antigravity' 'Antigravity is refused: every copy shares its sign-in'
+  $agIdeDir = Join-Path $root 'apps\Antigravity IDE'
+  New-FakeExeAs (Join-Path $agIdeDir 'Antigravity IDE.exe') 'Antigravity IDE'
+  [void][IO.Directory]::CreateDirectory((Join-Path $agIdeDir 'resources'))
+  [IO.File]::WriteAllText((Join-Path $agIdeDir 'resources\app.asar'), 'stand-in')
+  Assert-Throws { Resolve-ElectronApp (Join-Path $agIdeDir 'Antigravity IDE.exe') } "IDE's agent" 'and Antigravity IDE, whose agent shares that sign-in'
+
+  # A folder the user owns but is locked out of, as VS Code's Git extension makes
+  # (askpass\<id>, open to one SID that isn't the user's): removing needs it back.
+  $lockedData = Join-Path $root 'locked data'
+  $locked = Join-Path $lockedData 'User\globalStorage\vscode.git\askpass\abc'
+  [void][IO.Directory]::CreateDirectory((Join-Path $locked 'inner'))
+  [IO.File]::WriteAllText((Join-Path $locked 'inner\f.txt'), 'x')
+  $lockedAcl = New-Object Security.AccessControl.DirectorySecurity
+  $lockedAcl.SetAccessRuleProtection($true, $false)
+  $lockedAcl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-5-21-1-2-3'), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+  [IO.Directory]::SetAccessControl($locked, $lockedAcl)
+  Assert-Throws { [void][IO.Directory]::GetDirectories($locked) } 'denied' 'a locked-out folder, as VS Code makes'
+  Unlock-DataDir $lockedData
+  Remove-Item -LiteralPath $lockedData -Recurse -Force -ErrorAction SilentlyContinue
+  Assert-True (-not (Test-Path -LiteralPath $lockedData)) 'Unlock-DataDir gives it back, so the data folder can be removed'
   $optionsDir = Join-Path $root 'telegram options'
   Set-TelegramOptions $optionsDir
   $optionsFile = Join-Path $optionsDir 'tdata\experimental_options.json'
@@ -1150,6 +1181,37 @@ try {
   Assert-Cli (Invoke-Cli @('change', 'Telegram Work', '-Color', 'red')) 0 'Changed' 'change its colour'
   Assert-Cli (Invoke-Cli @('remove', 'Telegram Work', '-DeleteData')) 0 'Removed' 'remove Telegram Work'
   Remove-Item -LiteralPath (Join-Path $startMenu 'Telegram Desktop') -Recurse -Force
+
+  # -------------------------------------------------------------------------
+  Write-Section 'VS Code'
+  # The fake in VS Code's layout from the unit checks: its product.json has the
+  # folder names VS Code's has.
+  $codeExe = Join-Path $root 'apps\Versioned Code\Code.exe'
+  $myCodex = Join-Path $root 'my codex'
+  $r = Invoke-Cli @('new', '-App', $codeExe, '-Name', 'Coder', '-Environment', "TWINBAR_TEST_VAR=mine; CODEX_HOME=$myCodex")
+  Assert-Cli $r 0 'Made' 'new: a VS Code twin'
+  Assert-True ($r.Out -match 'Claude Code and Codex' -and $r.Out -match '--extensions-dir') 'with notes on its own sign-ins and the shared extensions' $r.Out
+  $coder = Read-Record (@(Get-ChildItem -LiteralPath (Join-Path $twHome 'profiles') -Filter '*.coder.json')[0]).BaseName
+  Assert-Equal ('CLAUDE_CONFIG_DIR={0}\claude;CODEX_HOME={0}\codex' -f $coder.dataDir) $coder.appEnv 'the record: folders for Claude Code and Codex in its data folder'
+  [IO.File]::WriteAllText((Join-Path $coder.dataDir 'stay.txt'), 'keep running')
+  Assert-Cli (Invoke-Cli @('open', $coder.id)) 0 'Opening' 'open it'
+  $coderLaunched = Join-Path $coder.dataDir 'launched.txt'
+  if (Wait-Until { Test-Path -LiteralPath $coderLaunched } 20) {
+    $lines = [IO.File]::ReadAllLines($coderLaunched)
+    $got = @('claudeconfig', 'codexhome', 'testvar' | ForEach-Object { $k = $_; @($lines | Where-Object { $_ -like "$k=*" })[0] }) -join '|'
+    Assert-Equal ('claudeconfig={0}\claude|codexhome={1}|testvar=mine' -f $coder.dataDir, $myCodex) $got "the app gets Claude Code's folder, and the profile's own variables win (CODEX_HOME here)"
+    $commandLine = @($lines | Where-Object { $_ -like 'commandline=*' })[0]
+    Assert-True ($commandLine.Contains(('--shared-data-dir="{0}\shared-data"' -f $coder.dataDir))) "and a shared-data folder of its own" $commandLine
+    Assert-True (Test-Path -LiteralPath (Join-Path $coder.dataDir 'claude') -PathType Container) "the launcher made Claude Code's folder"
+  } else {
+    Assert-True $false 'it started'
+  }
+  Remove-Item -LiteralPath (Join-Path $coder.dataDir 'stay.txt')
+  $coderQuit = Wait-Until { @(Get-ProcessesFor $coder.dataDir).Count -eq 0 -and @(Get-LaunchersFor $coder.id).Count -eq 0 } 30
+  $why = 'app processes: {0}; launchers: {1}; log: {2}' -f @(Get-ProcessesFor $coder.dataDir).Count, @(Get-LaunchersFor $coder.id).Count,
+    ((@(Get-Content -LiteralPath (Join-Path $twHome 'logs\launcher.log') -ErrorAction SilentlyContinue) -match [regex]::Escape($coder.id)) -join ' | ')
+  Assert-True $coderQuit 'it quit, and its launcher too' $why
+  Assert-Cli (Invoke-Cli @('remove', $coder.id, '-DeleteData')) 0 'Removed' 'remove the VS Code twin'
 
   # -------------------------------------------------------------------------
   Write-Section 'Storage, options and backups'

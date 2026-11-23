@@ -57,6 +57,8 @@ static class FakeApp {
       "https_proxy=" + (Environment.GetEnvironmentVariable("HTTPS_PROXY") ?? ""),
       "all_proxy=" + (Environment.GetEnvironmentVariable("ALL_PROXY") ?? ""),
       "testvar=" + (Environment.GetEnvironmentVariable("TWINBAR_TEST_VAR") ?? ""),
+      "claudeconfig=" + (Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR") ?? ""),
+      "codexhome=" + (Environment.GetEnvironmentVariable("CODEX_HOME") ?? ""),
       "commandline=" + Environment.CommandLine
     });
 

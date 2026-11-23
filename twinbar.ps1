@@ -66,7 +66,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.11.0'
+$script:TwinbarVersion = '0.12.0'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
@@ -88,7 +88,7 @@ $script:Appearances = [ordered]@{
 $script:RecordFields = @(
   'schema', 'id', 'name', 'appName', 'appId', 'appKind', 'family', 'launchExe', 'realExe', 'packageApp',
   'dataDir', 'shortcut', 'aumid', 'launcher', 'style', 'color', 'badge', 'appearance', 'proxy', 'userArgs', 'userEnv', 'extraArgs',
-  'icon', 'created', 'updated', 'twinbarVersion'
+  'appEnv', 'icon', 'created', 'updated', 'twinbarVersion'
 )
 
 # ---------------------------------------------------------------------------
@@ -993,6 +993,41 @@ function Move-ToRecycleBin([string] $Path) {
   [TwinbarInterop.Shell]::Recycle($Path)
 }
 
+# Gives the user back the folders in a data folder they own but can't open, so it
+# can be deleted (and the Recycle Bin emptied). VS Code's Git extension makes
+# User\globalStorage\vscode.git\askpass\<id> with access for one SID that isn't the
+# user's. The owner may always reset a folder's permissions to the inherited ones;
+# icacls does that, the folder's contents included. Used just before removing.
+function Unlock-DataDir([string] $Dir) {
+  if (-not [IO.Directory]::Exists($Dir)) { return }
+  $icacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
+  $pending = New-Object 'System.Collections.Generic.Stack[string]'
+  $pending.Push($Dir)
+  while ($pending.Count) {
+    $d = $pending.Pop()
+    $subs = $null
+    try { $subs = [IO.Directory]::GetDirectories($d) } catch {
+      if ($_.Exception.GetBaseException() -isnot [UnauthorizedAccessException]) { continue }
+      $psi = New-Object Diagnostics.ProcessStartInfo($icacls, ('"{0}" /reset /T /C /Q' -f $d))
+      $psi.UseShellExecute = $false
+      $psi.CreateNoWindow = $true
+      $psi.RedirectStandardOutput = $true
+      $psi.RedirectStandardError = $true
+      try {
+        $proc = [Diagnostics.Process]::Start($psi)
+        [void]$proc.StandardOutput.ReadToEnd()
+        [void]$proc.StandardError.ReadToEnd()
+        $proc.WaitForExit()
+        Write-Verbose "reset the permissions of $d"
+      } catch { Write-Verbose "couldn't reset the permissions of ${d}: $($_.Exception.Message)" }
+      try { $subs = [IO.Directory]::GetDirectories($d) } catch { continue }
+    }
+    foreach ($s in $subs) {
+      if (-not ([IO.File]::GetAttributes($s) -band [IO.FileAttributes]::ReparsePoint)) { $pending.Push($s) }
+    }
+  }
+}
+
 # ---------------------------------------------------------------------------
 # The launcher: what a profile's shortcut starts. It starts the app with the
 # profile's data folder, then puts the profile's AppUserModelID (and relaunch
@@ -1095,7 +1130,7 @@ namespace TwinbarLauncher {
     const uint WmGetIcon = 0x7F, WmSetIcon = 0x80, AbortIfHung = 2;
 
     static string logPath, profileId, appId, displayName, relaunchCommand, iconResource, iconFile;
-    static string launchExe, appKind, packageApp, exeBaseName, extraArgs, dataDir, proxy, userEnv, family;
+    static string launchExe, appKind, packageApp, exeBaseName, extraArgs, dataDir, proxy, userEnv, appEnv, family;
     static readonly Dictionary<int, IntPtr> iconsBySize = new Dictionary<int, IntPtr>();
     static Regex dataDirArgument;
     static IntPtr mainProcess = IntPtr.Zero, hook = IntPtr.Zero;
@@ -1140,6 +1175,7 @@ namespace TwinbarLauncher {
       extraArgs = Text(record, "extraArgs");
       proxy = Text(record, "proxy");
       userEnv = Text(record, "userEnv");
+      appEnv = Text(record, "appEnv");
       family = Text(record, "family");
       exeBaseName = Path.GetFileNameWithoutExtension(Text(record, "realExe"));
       displayName = Text(record, "appName") + " " + Text(record, "name");
@@ -1266,7 +1302,17 @@ namespace TwinbarLauncher {
         info.EnvironmentVariables["ALL_PROXY"] = proxy;
         info.EnvironmentVariables["NO_PROXY"] = "localhost,127.0.0.1,::1";
       }
-      // The profile's own environment variables: NAME=value;NAME2=value.
+      // Folders of the profile's own for code that keeps its sign-in outside the data
+      // folder (Claude Code's and Codex's, in a VS Code twin): NAME=folder;NAME2=folder.
+      foreach (string pair in appEnv.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries)) {
+        int equals = pair.IndexOf('=');
+        if (equals <= 0) continue;
+        string folder = pair.Substring(equals + 1);
+        try { Directory.CreateDirectory(folder); } catch (Exception e) { Log(profileId + ": couldn't make " + folder + ": " + e.Message); }
+        info.EnvironmentVariables[pair.Substring(0, equals)] = folder;
+      }
+      // The profile's own environment variables: NAME=value;NAME2=value. They come
+      // last, so they can override any of the above.
       foreach (string pair in userEnv.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries)) {
         int equals = pair.IndexOf('=');
         if (equals > 0) info.EnvironmentVariables[pair.Substring(0, equals)] = pair.Substring(equals + 1);
@@ -2358,6 +2404,37 @@ function Set-TelegramOptions([string] $DataDir) {
   [IO.File]::WriteAllText($path, ($options | ConvertTo-Json), $script:Utf8NoBom)
 }
 
+# VS Code and the editors built on it (Cursor, Windsurf...): their product.json names
+# the folder in %USERPROFILE% they keep extensions in (dataFolderName), and since
+# VS Code 1.14x the one shared by every data folder (sharedDataFolderName). $null
+# for any other app.
+function Get-CodeEditorProduct($Record) {
+  if ($Record.appKind -eq 'store' -or (Get-RecordValue $Record 'family') -eq 'telegram' -or -not $Record.realExe) { return $null }
+  if (-not [IO.File]::Exists($Record.realExe)) { return $null }
+  $appDir = Get-ElectronAppDir $Record.realExe
+  $productFile = if ($appDir) { [IO.Path]::Combine($appDir, 'resources\app\product.json') }
+  if (-not $productFile -or -not [IO.File]::Exists($productFile)) { return $null }
+  try { $product = [IO.File]::ReadAllText($productFile) | ConvertFrom-Json } catch { return $null }
+  $folder = "$(Get-RecordValue $product 'dataFolderName')"
+  if ($folder -notmatch '^\.?[A-Za-z0-9_-]+$') { return $null }
+  return [pscustomobject]@{ DataFolderName = $folder; HasSharedData = [bool]"$(Get-RecordValue $product 'sharedDataFolderName')" }
+}
+
+# Where a VS Code twin keeps what the main VS Code would otherwise share with it.
+# VS Code's shared storage (recent folders, workspace trust, secrets the twin can't
+# decrypt) is in %USERPROFILE%\.vscode-shared unless --shared-data-dir says otherwise.
+# Claude Code and Codex keep their sign-in in %USERPROFILE%\.claude and \.codex
+# unless CLAUDE_CONFIG_DIR and CODEX_HOME say otherwise; the launcher makes the folders.
+function Set-CodeEditorFolders([System.Collections.IDictionary] $Record) {
+  $Record.appEnv = ''
+  $editor = Get-CodeEditorProduct $Record
+  if (-not $editor) { return }
+  if ($editor.HasSharedData -and (Get-RecordValue $Record 'userArgs') -notmatch '(?i)--shared-data-dir') {
+    $Record.extraArgs = ('--shared-data-dir="{0}" {1}' -f (Join-Path $Record.dataDir 'shared-data'), $Record.extraArgs).Trim()
+  }
+  $Record.appEnv = 'CLAUDE_CONFIG_DIR={0};CODEX_HOME={1}' -f (Join-Path $Record.dataDir 'claude'), (Join-Path $Record.dataDir 'codex')
+}
+
 function Get-FamilyNotes($Record) {
   if ($Record.family -eq 'telegram') {
     "Telegram: links (tg://) keep opening in your main Telegram. In this profile, leave Settings > Advanced > 'Launch Telegram when system starts' off: it would replace your main Telegram's start-up entry."
@@ -2365,17 +2442,10 @@ function Get-FamilyNotes($Record) {
   }
   # VS Code and the editors built on it keep extensions in %USERPROFILE%\<dataFolderName>,
   # whatever the data folder: shared with the main app unless asked otherwise.
-  $appDir = if ($Record.appKind -ne 'store' -and $Record.realExe -and (Test-Path -LiteralPath $Record.realExe)) { Get-ElectronAppDir $Record.realExe }
-  $productFile = if ($appDir) { Join-Path $appDir 'resources\app\product.json' }
-  if ($productFile -and (Test-Path -LiteralPath $productFile -PathType Leaf)) {
-    $folder = ''
-    try { $folder = "$(Get-RecordValue ([IO.File]::ReadAllText($productFile) | ConvertFrom-Json) 'dataFolderName')" } catch { Write-Verbose "can't read $productFile" }
-    if ($folder -match '^\.?[A-Za-z0-9_-]+$') {
-      "Extensions: this profile uses the same ones as your main $($Record.appName) (%USERPROFILE%\$folder\extensions). For extensions of its own: twinbar change $($Record.id) -AppArgs '--extensions-dir ""<a folder>""'"
-    }
-  }
-  if ($Record.appName -eq 'Antigravity IDE') {
-    "Antigravity IDE keeps its agent's data (conversations, its daemon) in %USERPROFILE%\.gemini\antigravity-ide, which every copy shares; its Google sign-in may be shared too."
+  $editor = Get-CodeEditorProduct $Record
+  if ($editor) {
+    "Sign-ins: this profile signs in on its own to GitHub and Microsoft accounts, and to Claude Code and Codex (their settings start empty, in its data folder's claude and codex folders)."
+    "Extensions: this profile uses the same ones as your main $($Record.appName) (%USERPROFILE%\$($editor.DataFolderName)\extensions). For extensions of its own: twinbar change $($Record.id) -AppArgs '--extensions-dir ""<a folder>""'"
   }
 }
 
@@ -2538,6 +2608,10 @@ function Get-ElectronAppDir([string] $Exe) {
 # is signed in to the same account (by the product name in the .exe's version info).
 $script:SharedSignInApps = @{
   'Antigravity' = "Antigravity keeps your Google sign-in in Windows Credential Manager (gemini:antigravity) and its agent's data in %USERPROFILE%\.gemini\antigravity, outside the data folder Twinbar gives it; every copy shares them, so a twin would be signed in to the same account"
+  # Measured with 2.8: its editor signs in per data folder, but its agent (agy.exe,
+  # started by the built-in agy extension with --app_data_dir=antigravity) uses the
+  # same Credential Manager entry and folder as Antigravity itself.
+  'Antigravity IDE' = "Antigravity IDE's agent keeps your Google sign-in in Windows Credential Manager (gemini:antigravity) and its data in %USERPROFILE%\.gemini\antigravity, outside the data folder Twinbar gives it; every copy shares them, so a twin's agent would be signed in to the same account"
 }
 
 # Telegram Desktop from telegram.org (Qt, not Electron): Telegram.exe whose version
@@ -2810,6 +2884,7 @@ function Publish-Profile([System.Collections.IDictionary] $Record) {
   }
   $Record.launcher = Initialize-Launcher
   $Record.extraArgs = Get-ExtraArgs $Record.appearance $Record.proxy $Record.appKind $Record.userArgs $Record.family
+  Set-CodeEditorFolders $Record
   if ($Record.family -eq 'telegram') { Set-TelegramOptions $Record.dataDir }
   $oldIcon = $Record.icon
   # Store apps move with every update, so even their original icon gets a copy.
@@ -3452,6 +3527,7 @@ function Invoke-Remove([string] $Which, [switch] $WithData) {
   if ($WithData) {
     $state = Get-DataDirState $p.dataDir $p.id
     if ($state -eq 'ours') {
+      Unlock-DataDir $p.dataDir
       Move-ToRecycleBin $p.dataDir
       Remove-EmptyDataParents $p.dataDir
       $report += "  Sign-in data: moved to the Recycle Bin ($($p.dataDir))"

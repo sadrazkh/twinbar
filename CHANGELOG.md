@@ -6,6 +6,43 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-23
+
+VS Code twins with their own Claude Code and Codex, and Antigravity IDE
+refused like Antigravity.
+
+### Fixed
+
+- A VS Code twin was signed in to the same Claude Code and Codex accounts as
+  the main VS Code: those extensions keep their sign-in in
+  `%USERPROFILE%\.claude` and `%USERPROFILE%\.codex`, outside VS Code's data
+  folder. A profile of VS Code or an editor built on it now starts with
+  `CLAUDE_CONFIG_DIR` and `CODEX_HOME` set to `claude` and `codex` folders in
+  its data folder (the launcher makes them), so they sign in on their own,
+  in the editor and in its terminal. The profile's own environment variables
+  still win.
+- VS Code 1.14x keeps some state in `%USERPROFILE%\.vscode-shared`, shared by
+  every data folder: recent folders, workspace trust, and secrets a twin
+  can't decrypt (it logged "Error while decrypting the ciphertext"). A twin
+  now gets its own, with `--shared-data-dir` pointing into its data folder,
+  unless its extra arguments set one.
+- Removing a VS Code profile with its data could leave a folder that neither
+  Windows nor the Recycle Bin could delete: VS Code's Git extension makes
+  `User\globalStorage\vscode.git\askpass\<id>` open to one SID that isn't
+  yours. Before removing a data folder, Twinbar resets the permissions of any
+  folder in it that you own but can't open (as the owner you may).
+
+### Changed
+
+- Antigravity IDE is refused, saying why, like Antigravity: its editor signs
+  in per data folder, but its agent (started by the built-in agy extension
+  with `--app_data_dir=antigravity`) keeps your Google sign-in in Windows
+  Credential Manager (`gemini:antigravity`) and its data in
+  `%USERPROFILE%\.gemini\antigravity`, so a twin's agent was signed in to the
+  same account.
+- Profile records have a new field, `appEnv`: environment variables Twinbar
+  sets for the app (folders of the profile's own), before the profile's own.
+
 ## [0.11.0] - 2026-11-23
 
 VS Code's new layout, and a straight answer about Antigravity.

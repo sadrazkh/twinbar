@@ -320,6 +320,34 @@ with the installed Telegram:
   a twin with its own `--user-data-dir` came up signed in to the same
   account. No setting moves either, so it's refused by its product name.
 
+## Phase 11: what a VS Code twin still shared (0.12.0)
+
+Found from a real VS Code 1.147 twin's logs:
+
+- GitHub and Microsoft sign-ins were the twin's own (0 sessions; Microsoft
+  goes through the Windows broker, which offers the accounts Windows knows).
+- Claude Code found the main account's tokens: it keeps them in
+  `%USERPROFILE%\.claude`, and Codex in `%USERPROFILE%\.codex`. Both honour an
+  environment variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), which VS Code
+  passes to its extension host and terminals. The record's new `appEnv`
+  field holds them, pointing into the data folder; the launcher makes the
+  folders (Codex wants its folder to exist) and sets them before the
+  profile's own variables, which can override them.
+- VS Code 1.14x opens "application shared storage" in
+  `%USERPROFILE%\<sharedDataFolderName>` (`.vscode-shared`) for every data
+  folder: recent folders, workspace trust, chat usage, and secrets encrypted
+  with the main copy's key (the twin logged a safeStorage decrypt error).
+  VS Code reads `--shared-data-dir`; Twinbar passes one in the data folder
+  when `product.json` has `sharedDataFolderName`.
+- Antigravity IDE 2.8's built-in agy extension starts `agy.exe --hub
+  --app_data_dir=antigravity`, with `HOME` set to the user folder: its agent
+  uses Antigravity's Credential Manager entry and folder. Refused too.
+- VS Code's Git extension makes `User\globalStorage\vscode.git\askpass\<id>`
+  with a protected DACL granting one SID that isn't the user's, so the user
+  (its owner) can't list or delete it. Before recycling a data folder, Twinbar
+  walks it and runs `icacls /reset /T` on any folder it can't open; owners
+  may always rewrite a DACL. Backups and sizes already skipped such folders.
+
 ## Not planned
 
 - macOS or Linux. On a Mac, use [DoppelDock](https://github.com/ZarinLab/doppeldock),
