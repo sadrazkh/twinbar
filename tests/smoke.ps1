@@ -1206,8 +1206,12 @@ try {
   } else {
     Assert-True $false 'it started'
   }
+  # The app must stay until the launcher has found it: an app gone before then
+  # counts as one that never started, which the launcher waits 2 minutes for.
+  $coderLog = Join-Path $twHome 'logs\launcher.log'
+  Assert-True (Wait-Until { [IO.File]::ReadAllText($coderLog) -match ([regex]::Escape($coder.id) + ': looking after process') } 15) 'the launcher found it'
   Remove-Item -LiteralPath (Join-Path $coder.dataDir 'stay.txt')
-  $coderQuit = Wait-Until { @(Get-ProcessesFor $coder.dataDir).Count -eq 0 -and @(Get-LaunchersFor $coder.id).Count -eq 0 } 30
+  $coderQuit =Wait-Until { @(Get-ProcessesFor $coder.dataDir).Count -eq 0 -and @(Get-LaunchersFor $coder.id).Count -eq 0 } 30
   $why = 'app processes: {0}; launchers: {1}; log: {2}' -f @(Get-ProcessesFor $coder.dataDir).Count, @(Get-LaunchersFor $coder.id).Count,
     ((@(Get-Content -LiteralPath (Join-Path $twHome 'logs\launcher.log') -ErrorAction SilentlyContinue) -match [regex]::Escape($coder.id)) -join ' | ')
   Assert-True $coderQuit 'it quit, and its launcher too' $why
