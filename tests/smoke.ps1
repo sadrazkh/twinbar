@@ -42,6 +42,7 @@ $runKey = "$runKeyRoot\Run"
 $script:passed = 0
 $script:failed = 0
 $script:fakeBuilt = $null
+$script:fakeTelegram = $null
 $script:extraEnv = @{} # more environment variables for Invoke-Cli
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,20 @@ function New-FakeExe([string] $Path) {
   }
   [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Path))
   Copy-Item -LiteralPath $script:fakeBuilt -Destination $Path
+}
+
+# A stand-in for Telegram Desktop: the fake app built as Telegram.exe with Telegram's
+# product name, in a folder with an updater and an uninstaller next to it.
+function New-FakeTelegram([string] $Dir) {
+  if (-not $script:fakeTelegram) {
+    $script:fakeTelegram = Join-Path $root 'build\Telegram.exe'
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $script:fakeTelegram))
+    $source = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'FakeApp.cs')).Replace('AssemblyProduct("Fake App")', 'AssemblyProduct("Telegram Desktop")').Replace('AssemblyTitle("Fake App")', 'AssemblyTitle("Telegram Desktop")')
+    Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $script:fakeTelegram -OutputType WindowsApplication -ReferencedAssemblies 'System.Windows.Forms'
+  }
+  [void][IO.Directory]::CreateDirectory($Dir)
+  Copy-Item -LiteralPath $script:fakeTelegram -Destination (Join-Path $Dir 'Telegram.exe')
+  foreach ($other in 'Updater.exe', 'unins000.exe') { [IO.File]::WriteAllText((Join-Path $Dir $other), 'stand-in') }
 }
 
 function New-ElectronDir([string] $Dir, [string] $ExeName = 'FakeApp.exe') {
@@ -530,8 +545,35 @@ try {
   Assert-Equal '--disable-gpu --lang=fa' (Resolve-AppArgs '  --disable-gpu --lang=fa ') 'arguments: tidied'
   Assert-Equal '' (Resolve-AppArgs 'none') 'arguments: none'
   Assert-Equal '--title="a b"' (Resolve-AppArgs '--title="a b"') 'arguments: quotes that close are fine'
-  Assert-Throws { Resolve-AppArgs '--User-Data-Dir=C:\x' } "can't set --user-data-dir" "arguments: the data folder isn't theirs to set"
+  Assert-Throws { Resolve-AppArgs '--User-Data-Dir=C:\x' } "can't set the data folder" "arguments: the data folder isn't theirs to set"
+  Assert-Throws { Resolve-AppArgs '-startintray -workdir "C:\x"' } "can't set the data folder" "arguments: nor Telegram's -workdir"
+  Assert-Equal '-startintray' (Resolve-AppArgs '-startintray') "arguments: Telegram's own switches are fine"
   Assert-Throws { Resolve-AppArgs '--title="a b' } 'never closed' 'arguments: a quote must close'
+
+  # Telegram profiles: how they start, and how their process is recognised.
+  $tgDirUnit = 'C:\Users\x\AppData\Roaming\Twinbar\data\telegram\work'
+  Assert-Equal "-workdir ""$tgDirUnit"" -startintray" (Get-LaunchArguments ([pscustomobject]@{ family = 'telegram'; dataDir = $tgDirUnit; extraArgs = '-startintray' })) 'Telegram starts with -workdir and its folder'
+  Assert-Equal '--user-data-dir="C:\d" --force-dark-mode' (Get-LaunchArguments ([pscustomobject]@{ family = 'electron'; dataDir = 'C:\d'; extraArgs = '--force-dark-mode' })) 'Electron apps with --user-data-dir'
+  Assert-Equal '-x' (Get-ExtraArgs 'dark' 'http://h:1' 'standard' '-x' 'telegram') "Telegram gets no Chromium switches, only its extra arguments"
+  Assert-True (Test-ProfileCommandLine $tgDirUnit ('"C:\T\Telegram.exe" -workdir "' + $tgDirUnit + '"')) 'process: Telegram with its -workdir'
+  Assert-True (Test-ProfileCommandLine $tgDirUnit 'C:\T\Telegram.exe -workdir "C:/Users/x/AppData/Roaming/Twinbar/data/telegram/work/" -autostart') "process: Telegram's own spelling after it restarts (forward slashes, a slash at the end)"
+  Assert-True (-not (Test-ProfileCommandLine $tgDirUnit ('"C:\T\Telegram.exe" -workdir "' + $tgDirUnit + '2"'))) 'process: not a folder whose name only starts the same'
+  Assert-True (-not (Test-ProfileCommandLine $tgDirUnit '"C:\T\Telegram.exe"')) 'process: not the main Telegram'
+  Assert-True (Test-ProfileCommandLine 'C:\d' 'app.exe --user-data-dir="C:\d" --x') 'process: Electron apps as before'
+  Assert-Throws { Assert-FamilyOptions 'telegram' 'http://h:1' 'system' } 'proxy setting of its own' "Telegram: no Twinbar proxy"
+  Assert-Throws { Assert-FamilyOptions 'telegram' '' 'dark' } 'its own theme' 'Telegram: no Twinbar light/dark'
+  $cefDir = Join-Path $root 'apps\SomeCef'
+  New-FakeExe (Join-Path $cefDir 'Some.exe')
+  [IO.File]::WriteAllText((Join-Path $cefDir 'libcef.dll'), 'stand-in')
+  Assert-Throws { Resolve-ElectronApp (Join-Path $cefDir 'Some.exe') } 'built on CEF' 'a CEF app is refused, saying why'
+  $optionsDir = Join-Path $root 'telegram options'
+  Set-TelegramOptions $optionsDir
+  $optionsFile = Join-Path $optionsDir 'tdata\experimental_options.json'
+  Assert-True (([IO.File]::ReadAllText($optionsFile) | ConvertFrom-Json).'skip-url-scheme-register' -eq $true) 'Telegram option file: made with skip-url-scheme-register'
+  [IO.File]::WriteAllText($optionsFile, '{"a": 1, "skip-url-scheme-register": false}')
+  Set-TelegramOptions $optionsDir
+  $optionsBack = [IO.File]::ReadAllText($optionsFile) | ConvertFrom-Json
+  Assert-True ($optionsBack.'skip-url-scheme-register' -eq $true -and $optionsBack.a -eq 1) 'Telegram option file: turned back on, other options kept'
   Assert-Throws { Resolve-AppArgs "--a`n--b" } 'one line' 'arguments: one line'
   Assert-Equal 'A=1;B_2=x y;C=' (Resolve-EnvValue ' A=1; B_2 = x y ;C=') 'environment: NAME=value pairs, tidied'
   Assert-Equal 'NODE_OPTIONS=--max-old-space-size=4096' (Resolve-EnvValue 'NODE_OPTIONS=--max-old-space-size=4096') "environment: '=' inside a value"
@@ -596,7 +638,7 @@ try {
   Assert-Equal 'Main Helper' (($entries | ForEach-Object { $_.AppId }) -join ' ') 'Store manifest: both apps found'
   Assert-Equal 'fake-app.exe' ($entries[0].Aliases -join ',') 'Store manifest: the alias found'
   Assert-Equal (Join-Path $pkgDir 'app\FakeApp.exe') $entries[0].Exe 'Store manifest: the exe found'
-  Assert-Throws { Resolve-ElectronApp 'NoSuchApp4711' } "no file, folder or Microsoft Store app" 'an unknown Store app name is refused'
+  Assert-Throws { Resolve-ElectronApp 'NoSuchApp4711' } "no file, folder, Start menu app or Microsoft Store app" 'an unknown app name is refused'
   $claude = @(Get-AppxPackage -Name Claude -ErrorAction SilentlyContinue | Where-Object { Test-ElectronDir (Join-Path $_.InstallLocation 'app') })
   if ($claude.Count) {
     $s = Resolve-ElectronApp 'Claude'
@@ -994,6 +1036,69 @@ try {
   Assert-Cli (Invoke-Cli @('apps')) 0 'Fake Squirrel\s+squirrel' 'apps shows a table'
 
   # -------------------------------------------------------------------------
+  Write-Section 'Telegram'
+  $tgDir = Join-Path $root 'apps\Telegram Desktop'
+  New-FakeTelegram $tgDir
+  $tgExe = Join-Path $tgDir 'Telegram.exe'
+  $tgApp = Resolve-ElectronApp $tgDir
+  Assert-Equal 'Telegram|telegram|telegram|standard' ('{0}|{1}|{2}|{3}' -f $tgApp.Name, $tgApp.Id, $tgApp.Family, $tgApp.Kind) 'Telegram Desktop is recognised, from its folder past Updater.exe'
+  [void][IO.Directory]::CreateDirectory((Join-Path $startMenu 'Telegram Desktop'))
+  Save-ShellLink -Path (Join-Path $startMenu 'Telegram Desktop\Telegram.lnk') -TargetPath $tgExe
+  $apps = @((ConvertFrom-Json (Invoke-Cli @('apps', '-Json')).Out) | ForEach-Object { $_ })
+  Assert-Equal 'telegram' (@($apps | Where-Object { $_.Name -eq 'Telegram' }) | ForEach-Object { $_.Family }) 'apps: Telegram Desktop in the Start menu'
+  Assert-Cli (Invoke-Cli @('new', '-App', $tgExe, '-Name', 'Work', '-Proxy', 'http://127.0.0.1:9')) 1 'proxy setting of its own' "Telegram: Twinbar's proxy is refused (Telegram has its own)"
+  Assert-Cli (Invoke-Cli @('new', '-App', $tgExe, '-Name', 'Work', '-Appearance', 'dark')) 1 'its own theme' 'Telegram: light/dark is refused (Telegram has its own)'
+  Assert-Cli (Invoke-Cli @('new', '-App', $tgExe, '-Name', 'Work', '-AppArgs', '-workdir C:\x')) 1 "can't set the data folder" "Telegram: the arguments can't move the data folder"
+  # By the name twinbar apps shows, found through the Start menu.
+  $r = Invoke-Cli @('new', '-App', 'telegram', '-Name', 'Work', '-Color', 'teal', '-AppArgs', '-startintray')
+  Assert-Cli $r 0 'Made "Telegram Work"' 'new Telegram Work, giving -App the name from twinbar apps'
+  Assert-True ($r.Out -match 'tg://' -and $r.Out -match 'Launch Telegram when system starts') 'with a note on links and start-up' $r.Out
+  $tg = Read-Record 'telegram.work'
+  Assert-Equal 'telegram|-startintray' ('{0}|{1}' -f $tg.family, $tg.extraArgs) "the record: family telegram, and no Chromium switches"
+  $tgOptions = Join-Path $tg.dataDir 'tdata\experimental_options.json'
+  Assert-True ((Test-Path -LiteralPath $tgOptions) -and ([IO.File]::ReadAllText($tgOptions) | ConvertFrom-Json).'skip-url-scheme-register' -eq $true) "links stay with the main Telegram: skip-url-scheme-register is on"
+  # An option Telegram keeps there already stays, and the launcher puts ours back.
+  [IO.File]::WriteAllText($tgOptions, '{"some-option": 5}')
+  [IO.File]::WriteAllText((Join-Path $tg.dataDir 'stay.txt'), 'keep running')
+  [IO.File]::WriteAllText((Join-Path $tg.dataDir 'window.txt'), 'show a window')
+  Assert-Cli (Invoke-Cli @('open', 'Telegram Work')) 0 'Opening Telegram Work' 'open Telegram Work'
+  $tgLaunched = Join-Path $tg.dataDir 'launched.txt'
+  if (Wait-Until { Test-Path -LiteralPath $tgLaunched } 20) {
+    $lines = [IO.File]::ReadAllLines($tgLaunched)
+    $commandLine = @($lines | Where-Object { $_ -like 'commandline=*' })[0]
+    Assert-True ($commandLine.Contains("-workdir ""$($tg.dataDir)""") -and $commandLine -notmatch '--user-data-dir' -and $commandLine.EndsWith('-startintray')) 'Telegram gets -workdir with the profile folder, then its extra arguments' $commandLine
+  } else {
+    Assert-True $false 'Telegram started'
+  }
+  $saved = [IO.File]::ReadAllText($tgOptions) | ConvertFrom-Json
+  Assert-True ($saved.'skip-url-scheme-register' -eq $true -and $saved.'some-option' -eq 5) "the launcher sets the link option before each start, keeping Telegram's other options" ([IO.File]::ReadAllText($tgOptions))
+  Assert-True (Wait-Until { @(Get-ProcessesFor $tg.dataDir).Count -gt 0 } 10) 'the running Telegram is found by its -workdir'
+  $tgLog = Join-Path $twHome 'logs\launcher.log'
+  Assert-True (Wait-Until { [IO.File]::ReadAllText($tgLog) -match 'telegram\.work: looking after process' } 15) 'the launcher found it'
+  $script:tgWindow = [IntPtr]::Zero
+  $tgShown = Wait-Until {
+    foreach ($p in @(Get-ProcessesFor $tg.dataDir)) {
+      $h = ([Diagnostics.Process]::GetProcessById([int]$p.ProcessId)).MainWindowHandle
+      if ($h -ne [IntPtr]::Zero) { $script:tgWindow = $h; return $true }
+    }
+    return $false
+  } 15
+  if ($tgShown) {
+    Assert-True (Wait-Until { [TwinbarInterop.Shell]::GetWindowAppId($script:tgWindow) -eq 'Twinbar.telegram.work' } 10) "Telegram's window carries the profile's ID, so it gets a taskbar button of its own" ("window ID: '{0}'" -f [TwinbarInterop.Shell]::GetWindowAppId($script:tgWindow))
+  } else {
+    Assert-True $false "Telegram showed its window"
+  }
+  Assert-Equal 'running' (@(Get-ListRows | Where-Object { $_.id -eq 'telegram.work' })[0]).status 'list shows Telegram Work running'
+  Assert-Cli (Invoke-Cli @('clean', 'Telegram Work')) 0 'Manage local storage' "clean: Telegram's cache is Telegram's to clear"
+  Remove-Item -LiteralPath (Join-Path $tg.dataDir 'stay.txt')
+  Assert-True (Wait-Until { @(Get-ProcessesFor $tg.dataDir).Count -eq 0 -and @(Get-LaunchersFor 'telegram.work').Count -eq 0 } 30) 'Telegram quit, and its launcher too'
+  Remove-Item -LiteralPath (Join-Path $tg.dataDir 'window.txt'), $tgLaunched -ErrorAction SilentlyContinue
+  Assert-Cli (Invoke-Cli @('change', 'Telegram Work', '-Proxy', 'http://127.0.0.1:9')) 1 'proxy setting of its own' "change: Twinbar's proxy is refused for Telegram too"
+  Assert-Cli (Invoke-Cli @('change', 'Telegram Work', '-Color', 'red')) 0 'Changed' 'change its colour'
+  Assert-Cli (Invoke-Cli @('remove', 'Telegram Work', '-DeleteData')) 0 'Removed' 'remove Telegram Work'
+  Remove-Item -LiteralPath (Join-Path $startMenu 'Telegram Desktop') -Recurse -Force
+
+  # -------------------------------------------------------------------------
   Write-Section 'Storage, options and backups'
   Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
   $backupDir = Join-Path $root 'backups'
@@ -1004,7 +1109,7 @@ try {
     $kept = Read-Record 'fakeapp.kept'
     Assert-Equal '--disable-gpu --lang=fa|TWINBAR_TEST_VAR=hello;OTHER=1' ('{0}|{1}' -f $kept.userArgs, $kept.userEnv) 'the record has them'
     Assert-True ($kept.extraArgs.StartsWith('--proxy-server=') -and $kept.extraArgs.EndsWith('--disable-gpu --lang=fa')) "the arguments come after Twinbar's own switches" $kept.extraArgs
-    Assert-Cli (Invoke-Cli @('change', 'Kept', '-AppArgs', '--user-data-dir=C:\x')) 1 "can't set --user-data-dir" 'the arguments may not move the data folder'
+    Assert-Cli (Invoke-Cli @('change', 'Kept', '-AppArgs', '--user-data-dir=C:\x')) 1 "can't set the data folder" 'the arguments may not move the data folder'
     Assert-Cli (Invoke-Cli @('change', 'Kept', '-AppArgs', '--title="x')) 1 'never closed' 'the arguments need closed quotes'
     Assert-Cli (Invoke-Cli @('change', 'Kept', '-Environment', 'NOT A PAIR')) 1 'NAME=value' 'environment variables must be NAME=value'
 
@@ -1218,6 +1323,23 @@ public static class TwinbarFakeSetup {
     Assert-True (-not (Submit-ProfileDialog $bad)) 'New: a bad name is refused'
     Assert-True ($script:GuiMessages.Count -and $script:GuiMessages[0] -match '^The profile name may use letters') 'with a message that says why' ($script:GuiMessages -join ' | ')
     $bad.Form.Dispose()
+
+    # Picking Telegram turns off Twinbar's proxy and light/dark: it has its own.
+    $tgDialog = New-ProfileDialog $null
+    $tgDialog.Proxy.Text = 'http://127.0.0.1:9'
+    $otherApps = $tgDialog.AppList.Count
+    [void]$tgDialog.AppList.Add([pscustomobject]@{ Name = 'Telegram'; Kind = 'standard'; Family = 'telegram'; Source = 'C:\T\Telegram.exe'; LaunchExe = 'C:\T\Telegram.exe'; Id = 'telegram' })
+    [void]$tgDialog.App.Items.Add('Telegram')
+    $tgDialog.App.SelectedIndex = $tgDialog.App.Items.Count - 1
+    Update-DialogFamily $tgDialog
+    Assert-True (-not $tgDialog.Proxy.Enabled -and -not $tgDialog.FindProxy.Enabled -and -not $tgDialog.Appearance.Enabled) 'New: for Telegram, the proxy and light/dark are off'
+    Assert-Equal '' $tgDialog.Proxy.Text 'New: and the proxy is cleared'
+    if ($otherApps) {
+      $tgDialog.App.SelectedIndex = 0
+      Update-DialogFamily $tgDialog
+      Assert-True ($tgDialog.Proxy.Enabled -and $tgDialog.Appearance.Enabled) 'New: back on for an Electron app'
+    }
+    $tgDialog.Form.Dispose()
 
     $row = @($script:Gui.Rows | Where-Object { $_.Id -eq 'fakeapp.windowed' })[0]
     $edit = New-ProfileDialog $row
@@ -1505,6 +1627,10 @@ public static class TwinbarTestWindows {
   # -------------------------------------------------------------------------
   if ($RealApp) {
     Write-Section "Real app: $RealApp"
+    $realFamily = (Resolve-ElectronApp $RealApp).Family
+    # Telegram must leave the main Telegram's tg:// links alone.
+    $tgLinkKey = 'HKCU:\Software\Classes\tg\shell\open\command'
+    $tgLinkBefore = (Get-ItemProperty -LiteralPath $tgLinkKey -ErrorAction SilentlyContinue).'(default)'
     $r = Invoke-Cli @('new', '-App', $RealApp, '-Name', 'Smoke Test', '-ShortcutDir', $menu)
     Assert-Cli $r 0 'Made' 'new Smoke Test'
     $rec = @(Get-ListRows | Where-Object { $_.name -eq 'Smoke Test' })
@@ -1522,11 +1648,16 @@ public static class TwinbarTestWindows {
       }
       if ($Launch) {
         Assert-Cli (Invoke-Cli @('open', $rec.id)) 0 'Opening' 'open it'
-        Assert-True (Wait-Until { @(Get-ChildItem -LiteralPath $rec.dataDir -Force | Where-Object { $_.Name -ne '.twinbar-profile' }).Count -ge 2 } 60) 'the app keeps its data in the profile folder'
+        if ($realFamily -eq 'telegram') {
+          # Telegram keeps its data in tdata; Twinbar only put experimental_options.json there.
+          Assert-True (Wait-Until { @(Get-ChildItem -LiteralPath (Join-Path $rec.dataDir 'tdata') -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'experimental_options.json' }).Count -ge 1 } 60) 'Telegram keeps its data in the profile folder'
+        } else {
+          Assert-True (Wait-Until { @(Get-ChildItem -LiteralPath $rec.dataDir -Force | Where-Object { $_.Name -ne '.twinbar-profile' }).Count -ge 2 } 60) 'the app keeps its data in the profile folder'
+        }
         $procs = @(Get-ProcessesFor $rec.dataDir)
         Assert-True ($procs.Count -gt 0) 'the app runs with the profile folder'
         $realExe = (Resolve-ElectronApp $RealApp).RealExe
-        Assert-True (@($procs | Where-Object { $_.ExecutablePath -ieq $realExe }).Count -gt 0) "the Electron exe itself got the folder ($realExe)"
+        Assert-True (@($procs | Where-Object { $_.ExecutablePath -ieq $realExe }).Count -gt 0) "the app's own exe got the folder ($realExe)"
         Assert-Equal 'running' (@(Get-ListRows | Where-Object { $_.id -eq $rec.id })[0]).status 'list shows it running'
         if ($null -eq (Get-TaskbarAppIds)) {
           Write-Host '  skip  taskbar button (no taskbar here)'
@@ -1541,8 +1672,13 @@ public static class TwinbarTestWindows {
       }
       Assert-Cli (Invoke-Cli @('remove', $rec.id, '-DeleteData')) 0 'Removed' 'remove it with its data'
     }
+    if ($realFamily -eq 'telegram') {
+      Assert-Equal $tgLinkBefore ((Get-ItemProperty -LiteralPath $tgLinkKey -ErrorAction SilentlyContinue).'(default)') 'tg:// links still open the main Telegram'
+    }
 
-    if ($Launch) {
+    if ($Launch -and $realFamily -eq 'telegram') {
+      Write-Host '  skip  the proxy checks (Telegram keeps its own proxy setting)'
+    } elseif ($Launch) {
       # Through a proxy: a local SOCKS5 proxy that relays to the internet and logs
       # where it was asked to go; anything else the app connects to went around it.
       Write-Section "Real app through a proxy: $RealApp"

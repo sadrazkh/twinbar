@@ -37,9 +37,13 @@ static class FakeApp {
   [STAThread]
   static int Main(string[] args) {
     SetCurrentProcessExplicitAppUserModelID("Fake.App");
+    // Its data folder: Electron's --user-data-dir=<dir>, or Telegram's -workdir <dir>
+    // (built as Telegram.exe with the product name "Telegram Desktop", it stands in
+    // for Telegram Desktop).
     string dataDir = null;
-    foreach (string a in args) {
-      if (a.StartsWith("--user-data-dir=", StringComparison.OrdinalIgnoreCase)) dataDir = a.Substring(16);
+    for (int i = 0; i < args.Length; i++) {
+      if (args[i].StartsWith("--user-data-dir=", StringComparison.OrdinalIgnoreCase)) dataDir = args[i].Substring(16);
+      if (args[i] == "-workdir" && i + 1 < args.Length) dataDir = args[i + 1].Replace('/', '\\').TrimEnd('\\');
     }
     if (dataDir == null || !Directory.Exists(dataDir)) return 2;
 

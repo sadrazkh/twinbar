@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Twinbar: a second, separately signed-in copy of an Electron app on Windows.
+Twinbar: a second, separately signed-in copy of an Electron app (or Telegram Desktop) on Windows.
 
 .DESCRIPTION
   twinbar new -App APP -Name NAME [-Color C] [-Badge B] [-Style S] [-Appearance A]
@@ -28,8 +28,9 @@ Twinbar: a second, separately signed-in copy of an Electron app on Windows.
   twinbar help
   twinbar version
 
-APP is the app's .exe, its install folder or its Start menu shortcut; for a
-Microsoft Store app, its package name ("Claude") or app id.
+APP is the app's .exe, its install folder, its Start menu shortcut or the name
+twinbar apps shows ("Telegram"); for a Microsoft Store app, also its package
+name ("Claude") or app id.
 PROFILE is a profile's name ("Work"), its full name ("Postman Work") or its id
 ("postman.work"); see twinbar list.
 
@@ -65,7 +66,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TwinbarVersion = '0.9.0'
+$script:TwinbarVersion = '0.10.0'
 $script:SelfPath = $MyInvocation.MyCommand.Path
 $script:AppId = 'Twinbar.App' # the Twinbar window's own taskbar ID
 $script:CommandGiven = $PSBoundParameters.ContainsKey('Command')
@@ -85,7 +86,7 @@ $script:Appearances = [ordered]@{
 }
 # Every field of a profile record, in the order they're written.
 $script:RecordFields = @(
-  'schema', 'id', 'name', 'appName', 'appId', 'appKind', 'launchExe', 'realExe', 'packageApp',
+  'schema', 'id', 'name', 'appName', 'appId', 'appKind', 'family', 'launchExe', 'realExe', 'packageApp',
   'dataDir', 'shortcut', 'aumid', 'launcher', 'style', 'color', 'badge', 'appearance', 'proxy', 'userArgs', 'userEnv', 'extraArgs',
   'icon', 'created', 'updated', 'twinbarVersion'
 )
@@ -1083,6 +1084,8 @@ namespace TwinbarLauncher {
     [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CommandLineToArgvW(string commandLine, out int count);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
 
     static readonly Guid AppUserModel = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
     static Guid propertyStoreId = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
@@ -1092,7 +1095,7 @@ namespace TwinbarLauncher {
     const uint WmGetIcon = 0x7F, WmSetIcon = 0x80, AbortIfHung = 2;
 
     static string logPath, profileId, appId, displayName, relaunchCommand, iconResource, iconFile;
-    static string launchExe, appKind, packageApp, exeBaseName, extraArgs, dataDir, proxy, userEnv;
+    static string launchExe, appKind, packageApp, exeBaseName, extraArgs, dataDir, proxy, userEnv, family;
     static readonly Dictionary<int, IntPtr> iconsBySize = new Dictionary<int, IntPtr>();
     static Regex dataDirArgument;
     static IntPtr mainProcess = IntPtr.Zero, hook = IntPtr.Zero;
@@ -1137,6 +1140,7 @@ namespace TwinbarLauncher {
       extraArgs = Text(record, "extraArgs");
       proxy = Text(record, "proxy");
       userEnv = Text(record, "userEnv");
+      family = Text(record, "family");
       exeBaseName = Path.GetFileNameWithoutExtension(Text(record, "realExe"));
       displayName = Text(record, "appName") + " " + Text(record, "name");
       iconFile = Text(record, "icon");
@@ -1171,8 +1175,70 @@ namespace TwinbarLauncher {
       }
     }
 
+    // A command line split into arguments, the way Windows programs see them.
+    static string[] SplitArguments(string commandLine) {
+      int count;
+      IntPtr list = CommandLineToArgvW(commandLine, out count);
+      if (list == IntPtr.Zero) return new string[0];
+      try {
+        string[] result = new string[count];
+        for (int i = 0; i < count; i++) result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(list, i * IntPtr.Size));
+        return result;
+      } finally {
+        LocalFree(list);
+      }
+    }
+
+    static string NormalizeFolder(string path) {
+      try {
+        return Path.GetFullPath(path.Replace('/', '\\')).TrimEnd('\\');
+      } catch (Exception) {
+        return path;
+      }
+    }
+
+    // Whether a process's command line starts the app with this profile's data folder.
+    // Telegram restarts itself (after an update, say) with its own spelling of the
+    // folder: forward slashes and a slash at the end.
+    static bool IsProfileCommandLine(string commandLine) {
+      if (family != "telegram") return dataDirArgument.IsMatch(commandLine);
+      string[] parts = SplitArguments(commandLine);
+      string mine = NormalizeFolder(dataDir);
+      for (int i = 0; i + 1 < parts.Length; i++) {
+        if (parts[i] == "-workdir" && String.Equals(NormalizeFolder(parts[i + 1]), mine, StringComparison.OrdinalIgnoreCase)) return true;
+      }
+      return false;
+    }
+
+    // Keeps Telegram's links (tg://, tonsite://, ton://) with the main Telegram: a copy
+    // with a folder of its own registers itself for them on its first start and after
+    // each update, unless its experimental option skip-url-scheme-register is on.
+    // Telegram reads tdata\experimental_options.json from its folder at launch.
+    static void KeepTelegramLinks() {
+      string tdata = Path.Combine(dataDir, "tdata");
+      string path = Path.Combine(tdata, "experimental_options.json");
+      try {
+        JavaScriptSerializer json = new JavaScriptSerializer();
+        Dictionary<string, object> options = null;
+        if (File.Exists(path)) {
+          try { options = json.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8)); } catch (Exception) { options = null; }
+        }
+        if (options == null) options = new Dictionary<string, object>();
+        object current;
+        if (options.TryGetValue("skip-url-scheme-register", out current) && current is bool && (bool)current) return;
+        options["skip-url-scheme-register"] = true;
+        Directory.CreateDirectory(tdata);
+        File.WriteAllText(path, json.Serialize(options), new UTF8Encoding(false));
+        Log(profileId + ": set Telegram's skip-url-scheme-register, so links stay with the main Telegram");
+      } catch (Exception e) {
+        Log(profileId + ": couldn't set Telegram's link option: " + e.Message);
+      }
+    }
+
     static void StartApp() {
-      string arguments = ("--user-data-dir=\"" + dataDir + "\" " + extraArgs).Trim();
+      if (family == "telegram") KeepTelegramLinks();
+      string folderArgument = family == "telegram" ? "-workdir \"" + dataDir + "\"" : "--user-data-dir=\"" + dataDir + "\"";
+      string arguments = (folderArgument + " " + extraArgs).Trim();
       if (appKind == "store") {
         IApplicationActivationManager manager = (IApplicationActivationManager)new ApplicationActivationManager();
         uint pid;
@@ -1234,7 +1300,7 @@ namespace TwinbarLauncher {
         using (p) {
           if (mainProcess != IntPtr.Zero) continue;
           string commandLine = CommandLine(p.Id);
-          if (commandLine == null || commandLine.Contains("--type=") || !dataDirArgument.IsMatch(commandLine)) continue;
+          if (commandLine == null || commandLine.Contains("--type=") || !IsProfileCommandLine(commandLine)) continue;
           if (appKind == "squirrel" && String.Equals(ImagePath(p.Id), launchExe, StringComparison.OrdinalIgnoreCase)) continue;
           IntPtr handle = OpenProcess(Synchronize | QueryLimited, false, p.Id);
           if (handle == IntPtr.Zero) continue;
@@ -1579,7 +1645,8 @@ function New-AppHost([string] $Path, [string] $IconPath) {
 }
 
 # ---------------------------------------------------------------------------
-# Finding Electron apps to make profiles of (for "twinbar apps" and the window)
+# Finding apps to make profiles of (Electron apps and Telegram Desktop; for
+# "twinbar apps" and the window)
 # ---------------------------------------------------------------------------
 
 function Get-StartMenuDirs {
@@ -1599,11 +1666,12 @@ function Find-ElectronApps([switch] $NoStore) {
       $target = [Environment]::ExpandEnvironmentVariables($link.TargetPath)
       $targetDir = Split-Path -Parent $target
       # A cheap look first, so most shortcuts are passed over quickly.
-      if (-not ((Test-ElectronDir $targetDir) -or (Test-Path -LiteralPath (Join-Path $targetDir 'Update.exe')))) { continue }
+      if (-not ((Test-ElectronDir $targetDir) -or (Test-Path -LiteralPath (Join-Path $targetDir 'Update.exe')) -or
+          [IO.Path]::GetFileName($target) -ieq 'Telegram.exe')) { continue }
       try { $app = Resolve-ElectronApp $lnk.FullName } catch { continue }
       $key = $app.LaunchExe.ToLowerInvariant()
       if (-not $found.ContainsKey($key)) {
-        $found[$key] = [pscustomobject]@{ Name = $app.Name; Kind = $app.Kind; Source = $lnk.FullName; LaunchExe = $app.LaunchExe; Id = $app.Id }
+        $found[$key] = [pscustomobject]@{ Name = $app.Name; Kind = $app.Kind; Family = $app.Family; Source = $lnk.FullName; LaunchExe = $app.LaunchExe; Id = $app.Id }
       }
     }
   }
@@ -1617,7 +1685,7 @@ function Find-ElectronApps([switch] $NoStore) {
         $displayName = @($info.ProductName, $info.FileDescription, [IO.Path]::GetFileNameWithoutExtension($entry.Exe)) |
           Where-Object { $_ -and $_.Trim() } | Select-Object -First 1
         $found[$key] = [pscustomobject]@{
-          Name = $displayName; Kind = 'store'; Source = "$($entry.PackageFamily)!$($entry.AppId)"
+          Name = $displayName; Kind = 'store'; Family = 'electron'; Source = "$($entry.PackageFamily)!$($entry.AppId)"
           LaunchExe = $entry.Exe; Id = Get-NameKey ([IO.Path]::GetFileNameWithoutExtension($entry.Exe))
         }
       }
@@ -1629,10 +1697,13 @@ function Find-ElectronApps([switch] $NoStore) {
 function Invoke-Apps([switch] $AsJson) {
   $apps = @(Find-ElectronApps)
   if ($AsJson) { return (ConvertTo-Json -InputObject $apps -Depth 3) }
-  if (-not $apps.Count) { return 'No Electron apps found in the Start menu or the Microsoft Store apps.' }
+  if (-not $apps.Count) { return 'No Electron apps or Telegram Desktop found in the Start menu or the Microsoft Store apps.' }
   $w = [Math]::Max(4, ($apps | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum)
   ('{0}  {1}  {2}' -f 'App'.PadRight($w), 'Kind'.PadRight(8), 'Give twinbar new -App')
-  foreach ($a in $apps) { ('{0}  {1}  {2}' -f $a.Name.PadRight($w), $a.Kind.PadRight(8), $a.Source) }
+  foreach ($a in $apps) {
+    $kind = if ($a.Family -eq 'telegram') { 'telegram' } else { $a.Kind }
+    ('{0}  {1}  {2}' -f $a.Name.PadRight($w), $kind.PadRight(8), $a.Source)
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -2213,9 +2284,57 @@ function Get-ProxyNotes([string] $ProxyValue) {
 }
 
 # Twinbar's own switches (appearance, proxy), then the profile's extra arguments.
-function Get-ExtraArgs([string] $AppearanceValue, [string] $ProxyValue, [string] $AppKind, [string] $UserArgs = '') {
+# Telegram takes neither switch: it has its own theme and proxy settings.
+function Get-ExtraArgs([string] $AppearanceValue, [string] $ProxyValue, [string] $AppKind, [string] $UserArgs = '', [string] $Family = 'electron') {
+  if ($Family -eq 'telegram') { return $UserArgs }
   $proxyArgs = Get-ProxyArgs $ProxyValue -NoDnsRule:($AppKind -eq 'store')
   return (@($script:Appearances[$AppearanceValue], $proxyArgs, $UserArgs) | Where-Object { $_ }) -join ' '
+}
+
+# What a Telegram profile can't take from Twinbar, and where Telegram has it instead.
+function Assert-FamilyOptions([string] $Family, [string] $ProxyChoice, [string] $AppearanceChoice) {
+  if ($Family -ne 'telegram') { return }
+  if ($ProxyChoice) {
+    Stop-Twinbar "Telegram has a proxy setting of its own, kept for each profile: open the profile, then Settings > Advanced > Connection type. Twinbar's proxy works with Electron apps"
+  }
+  if ($AppearanceChoice -and $AppearanceChoice -ne 'system') {
+    Stop-Twinbar 'Telegram keeps its own theme for each profile: open the profile, then Settings > Chat settings'
+  }
+}
+
+# How the launcher starts a profile: its data folder, then Twinbar's switches.
+function Get-LaunchArguments($Record) {
+  $folder = if ((Get-RecordValue $Record 'family') -eq 'telegram') { '-workdir "{0}"' -f $Record.dataDir } else { '--user-data-dir="{0}"' -f $Record.dataDir }
+  return ($folder + ' ' + (Get-RecordValue $Record 'extraArgs')).Trim()
+}
+
+# A Telegram profile must leave Telegram's tg://, tonsite:// and ton:// links with the
+# main Telegram: a copy with a data folder of its own registers itself for them on
+# its first start and after each update, unless its experimental option
+# skip-url-scheme-register is on. Telegram reads it from tdata\experimental_options.json
+# in its working folder at launch. (The launcher does this too, before each start.)
+function Set-TelegramOptions([string] $DataDir) {
+  $tdata = Join-Path $DataDir 'tdata'
+  $path = Join-Path $tdata 'experimental_options.json'
+  $options = [ordered]@{}
+  if (Test-Path -LiteralPath $path) {
+    try {
+      $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+      foreach ($p in $saved.PSObject.Properties) { $options[$p.Name] = $p.Value }
+    } catch {
+      Write-Verbose "rewriting ${path}: it isn't valid JSON"
+    }
+  }
+  if ($options.Contains('skip-url-scheme-register') -and $options['skip-url-scheme-register'] -eq $true) { return }
+  $options['skip-url-scheme-register'] = $true
+  [void][IO.Directory]::CreateDirectory($tdata)
+  [IO.File]::WriteAllText($path, ($options | ConvertTo-Json), $script:Utf8NoBom)
+}
+
+function Get-FamilyNotes($Record) {
+  if ($Record.family -eq 'telegram') {
+    "Telegram: links (tg://) keep opening in your main Telegram. In this profile, leave Settings > Advanced > 'Launch Telegram when system starts' off: it would replace your main Telegram's start-up entry."
+  }
 }
 
 # A profile's extra command-line arguments for the app: one line, quotes that
@@ -2225,7 +2344,7 @@ function Resolve-AppArgs([string] $Value) {
   $v = $Value.Trim()
   if ($v -match "[`r`n]") { Stop-Twinbar 'the extra arguments must be on one line' }
   if ($v.Length -gt 1000) { Stop-Twinbar 'the extra arguments must be at most 1000 characters' }
-  if ($v -match '(?i)--user-data-dir') { Stop-Twinbar "the extra arguments can't set --user-data-dir: the profile's data folder is Twinbar's to set" }
+  if ($v -match '(?i)--user-data-dir|(^|\s)-workdir\b') { Stop-Twinbar "the extra arguments can't set the data folder (--user-data-dir, -workdir): that's Twinbar's to set" }
   if (([regex]::Matches($v, '"')).Count % 2) { Stop-Twinbar 'the extra arguments have a quote that is never closed' }
   return $v
 }
@@ -2302,6 +2421,9 @@ function Resolve-StoreApp([string] $Value) {
     $entries = @($packages | Where-Object { $_.Name -ieq $v } | ForEach-Object { Get-StoreAppEntries $_ })
   }
   if (-not $entries.Count) { Stop-Twinbar "no Microsoft Store app found for '$Value'" }
+  if (@($entries | Where-Object { [IO.Path]::GetFileName($_.Exe) -ieq 'Telegram.exe' }).Count) {
+    Stop-Twinbar "that's Telegram from the Microsoft Store, which can't be given a data folder of its own; install Telegram Desktop from telegram.org and make the profile from that"
+  }
   $electron = @($entries | Where-Object { Test-ElectronDir (Split-Path -Parent $_.Exe) })
   if (-not $electron.Count) { Stop-Twinbar "'$Value' is a Microsoft Store app, but not an Electron app" }
   if ($electron.Count -gt 1) {
@@ -2315,6 +2437,7 @@ function Resolve-StoreApp([string] $Value) {
     Name       = (($displayName -replace '[\\/:*?"<>|]', '').Trim())
     Id         = Get-NameKey ([IO.Path]::GetFileNameWithoutExtension($e.Exe))
     Kind       = 'store'
+    Family     = 'electron'
     LaunchExe  = $e.Exe
     RealExe    = $e.Exe
     PackageApp = "$($e.PackageFamily)!$($e.AppId)"
@@ -2340,6 +2463,32 @@ function Test-ElectronDir([string] $Dir) {
     (Test-Path -LiteralPath (Join-Path $Dir 'resources\app\package.json') -PathType Leaf))
 }
 
+# Telegram Desktop from telegram.org (Qt, not Electron): Telegram.exe whose version
+# info says "Telegram Desktop". It takes -workdir <folder> for a data folder of its
+# own, and its "already running" check is per folder, so a profile works like an
+# Electron one.
+function Test-TelegramExe([string] $Exe) {
+  if ([IO.Path]::GetFileName($Exe) -ine 'Telegram.exe' -or -not (Test-Path -LiteralPath $Exe -PathType Leaf)) { return $false }
+  return ([Diagnostics.FileVersionInfo]::GetVersionInfo($Exe).ProductName -eq 'Telegram Desktop')
+}
+
+# Why a program isn't one Twinbar can make profiles of, as precisely as its files tell.
+function Get-UnsupportedReason([string] $Exe) {
+  $name = [IO.Path]::GetFileName($Exe)
+  $dir = Split-Path -Parent $Exe
+  $has = { param($f) @(Get-ChildItem -LiteralPath $dir -Filter $f -Recurse -Depth 3 -File -ErrorAction SilentlyContinue | Select-Object -First 1).Count -gt 0 }
+  if (& $has 'libcef.dll') {
+    return "$name is built on CEF (Chromium Embedded), not Electron: such apps choose their data folder themselves, so Twinbar can't give it one"
+  }
+  if ((& $has 'chrome.dll') -or (& $has 'msedge.dll')) {
+    return "$name is a Chromium browser, not an Electron app; browsers have profiles of their own"
+  }
+  if ((& $has 'Qt5Core.dll') -or (& $has 'Qt6Core.dll')) {
+    return "$name is a Qt app, not an Electron app; of Qt apps, Twinbar supports Telegram Desktop"
+  }
+  return "$name doesn't look like an Electron app (there's no resources\app.asar next to it) or Telegram Desktop"
+}
+
 # The newest "app-<version>" folder of a Squirrel install that holds ExeName.
 function Get-SquirrelLatestDir([string] $Root, [string] $ExeName) {
   $best = $null
@@ -2358,12 +2507,14 @@ function Get-SquirrelLatestDir([string] $Root, [string] $ExeName) {
 }
 
 function Find-AppExeInFolder([string] $Folder) {
-  $skip = '^(update|squirrel|elevate|uninstall.*|unins\d+|.*helper.*|crashpad_handler)\.exe$'
+  $telegram = Join-Path $Folder 'Telegram.exe'
+  if (Test-TelegramExe $telegram) { return $telegram }
+  $skip = '^(update|updater|squirrel|elevate|uninstall.*|unins\d+|.*helper.*|crashpad_handler)\.exe$'
   $exes = @(Get-ChildItem -LiteralPath $Folder -Filter '*.exe' -File | Where-Object { $_.Name -notmatch $skip })
   if (Test-Path -LiteralPath (Join-Path $Folder 'Update.exe') -PathType Leaf) {
     $exes = @($exes | Where-Object { Get-SquirrelLatestDir $Folder $_.Name })
   } elseif (-not (Test-ElectronDir $Folder)) {
-    Stop-Twinbar "no Electron app found in $Folder"
+    Stop-Twinbar "no Electron app or Telegram Desktop found in $Folder"
   }
   if ($exes.Count -eq 1) { return $exes[0].FullName }
   if ($exes.Count -eq 0) { Stop-Twinbar "no program found in $Folder" }
@@ -2382,14 +2533,20 @@ function Find-AppExeInFolder([string] $Folder) {
 #   RealExe   the Electron executable that ends up running
 function Resolve-ElectronApp([string] $Path) {
   if ([string]::IsNullOrWhiteSpace($Path)) {
-    Stop-Twinbar 'which app? Give -App: its .exe, its install folder or its Start menu shortcut'
+    Stop-Twinbar 'which app? Give -App: its .exe, its install folder, its Start menu shortcut or its name from twinbar apps'
   }
   $raw = $Path.Trim().Trim('"')
   if ($raw -match '^shell:AppsFolder\\' -or $raw -match '^[^\\/!:]+![^\\/!:]+$') { return (Resolve-StoreApp $raw) }
   $p = Resolve-FullPath $Path
   if (-not (Test-Path -LiteralPath $p)) {
     if ($raw -notmatch '[\\/]') {
-      try { return (Resolve-StoreApp $raw) } catch { Stop-Twinbar "not found: there's no file, folder or Microsoft Store app called '$raw'" }
+      # A name: a Microsoft Store app's, or one that twinbar apps lists from the Start menu.
+      $storeError = ''
+      try { return (Resolve-StoreApp $raw) } catch { $storeError = "$($_.Exception.Message)" }
+      $named = @(Find-ElectronApps -NoStore | Where-Object { $_.Name -ieq $raw -or $_.Id -ieq $raw })
+      if ($named.Count) { return (Resolve-ElectronApp $named[0].Source) }
+      if ($storeError -and $storeError -notmatch '^no Microsoft Store app found') { Stop-Twinbar $storeError }
+      Stop-Twinbar "not found: there's no file, folder, Start menu app or Microsoft Store app called '$raw' (twinbar apps lists the apps it finds)"
     }
     Stop-Twinbar "not found: $p"
   }
@@ -2417,6 +2574,9 @@ function Resolve-ElectronApp([string] $Path) {
   if (Test-IsStoreAppPath $p) { return (Resolve-StoreApp $p) }
   if (Test-Path -LiteralPath $p -PathType Container) { $p = Find-AppExeInFolder $p }
   if ($p -notmatch '\.exe$') { Stop-Twinbar "not a program (.exe): $p" }
+  if (Test-TelegramExe $p) {
+    return [pscustomobject]@{ Name = 'Telegram'; Id = 'telegram'; Kind = 'standard'; Family = 'telegram'; LaunchExe = $p; RealExe = $p; PackageApp = '' }
+  }
 
   $exeName = [IO.Path]::GetFileName($p)
   $dir = Split-Path -Parent $p
@@ -2441,7 +2601,7 @@ function Resolve-ElectronApp([string] $Path) {
     $kind = 'standard'
     $real = $p
   }
-  if (-not $kind) { Stop-Twinbar "$exeName doesn't look like an Electron app (there's no resources\app.asar next to it)" }
+  if (-not $kind) { Stop-Twinbar (Get-UnsupportedReason $p) }
 
   if (-not $displayName) {
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($real)
@@ -2459,6 +2619,7 @@ function Resolve-ElectronApp([string] $Path) {
     Name      = $displayName
     Id        = Get-NameKey ([IO.Path]::GetFileNameWithoutExtension($exeName))
     Kind      = $kind
+    Family    = 'electron'
     LaunchExe = $p
     RealExe   = $real
     PackageApp = ''
@@ -2534,6 +2695,7 @@ function ConvertTo-ProfileTable($Record) {
   $t = [ordered]@{}
   foreach ($field in $script:RecordFields) { $t[$field] = Get-RecordValue $Record $field }
   if (-not $t.appKind) { $t.appKind = 'standard' }
+  if (-not $t.family) { $t.family = 'electron' }
   if (-not $t.style) { $t.style = 'tint+badge' }
   if (-not $t.color) { $t.color = Resolve-ProfileColor '' $t.id }
   if (-not $t.badge) { $t.badge = Get-BadgeText '' $t.name }
@@ -2568,7 +2730,8 @@ function Publish-Profile([System.Collections.IDictionary] $Record) {
     }
   }
   $Record.launcher = Initialize-Launcher
-  $Record.extraArgs = Get-ExtraArgs $Record.appearance $Record.proxy $Record.appKind $Record.userArgs
+  $Record.extraArgs = Get-ExtraArgs $Record.appearance $Record.proxy $Record.appKind $Record.userArgs $Record.family
+  if ($Record.family -eq 'telegram') { Set-TelegramOptions $Record.dataDir }
   $oldIcon = $Record.icon
   # Store apps move with every update, so even their original icon gets a copy.
   if ($Record.style -ne 'original' -or $Record.appKind -eq 'store') {
@@ -2641,18 +2804,28 @@ function Find-Profile([string] $Which) {
   return $found[0]
 }
 
-# Processes started with --user-data-dir, fetched once per run.
+# Processes started with a data folder of their own (--user-data-dir, or Telegram's
+# -workdir), fetched once per run.
 $script:DataDirProcesses = $null
 function Get-DataDirProcesses {
   if ($null -eq $script:DataDirProcesses) {
-    $script:DataDirProcesses = @(Get-CimInstance -ClassName Win32_Process -Filter "CommandLine LIKE '%--user-data-dir%'" -ErrorAction SilentlyContinue)
+    $script:DataDirProcesses = @(Get-CimInstance -ClassName Win32_Process -Filter "CommandLine LIKE '%--user-data-dir%' OR CommandLine LIKE '%-workdir%'" -ErrorAction SilentlyContinue)
   }
   return $script:DataDirProcesses
 }
 
+# Whether a command line starts the app with this data folder. Telegram restarts
+# itself (after an update, say) with the folder in its own form: forward slashes
+# and a slash at the end.
+function Test-ProfileCommandLine([string] $DataDir, [string] $CommandLine) {
+  if (-not $CommandLine) { return $false }
+  $dir = [regex]::Escape($DataDir.TrimEnd('\'))
+  if ($CommandLine -match ('--user-data-dir="?' + $dir + '"?(?=\s|$)')) { return $true }
+  return ($CommandLine.Replace('/', '\') -match ('(^|\s)-workdir\s+"?' + $dir + '\\?"?(?=\s|$)'))
+}
+
 function Get-ProfileProcesses($Record) {
-  $pattern = '--user-data-dir="?' + [regex]::Escape($Record.dataDir.TrimEnd('\')) + '"?(?=\s|$)'
-  @(Get-DataDirProcesses) | Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern }
+  @(Get-DataDirProcesses) | Where-Object { Test-ProfileCommandLine $Record.dataDir $_.CommandLine }
 }
 
 function Get-ProfileStatus($Record) {
@@ -2681,6 +2854,7 @@ function Invoke-New {
   $argsChoice = Resolve-AppArgs $AppArgsValue
   $envChoice = Resolve-EnvValue $EnvValue
   $app = Resolve-ElectronApp $AppPath
+  Assert-FamilyOptions $app.Family $proxyChoice $appearanceValue
   $key = Get-NameKey $label
   $id = "$($app.Id).$key"
   $aumid = "$script:AppIdPrefix.$id"
@@ -2737,6 +2911,7 @@ function Invoke-New {
   $record.appName = $app.Name
   $record.appId = $app.Id
   $record.appKind = $app.Kind
+  $record.family = $app.Family
   $record.launchExe = $app.LaunchExe
   $record.realExe = $app.RealExe
   $record.packageApp = $app.PackageApp
@@ -2780,6 +2955,7 @@ function Invoke-New {
   "Open it from the Start menu, or run: twinbar open ""$fullName"""
   Get-ProxyNotes $record.proxy
   Get-EnvNotes $record
+  Get-FamilyNotes $record
 }
 
 # After a data folder went: its now-empty <app> folder, and the Store data root
@@ -2821,6 +2997,7 @@ function Invoke-Change {
   if ($BadgeText) { $record.badge = Get-BadgeText $BadgeText $record.name }
   if ($AppearanceName) { $record.appearance = Resolve-Appearance $AppearanceName }
   if ($ProxyValue) { $record.proxy = Resolve-ProxyValue $ProxyValue }
+  Assert-FamilyOptions $record.family $record.proxy $record.appearance
   if ($AppArgsValue) { $record.userArgs = Resolve-AppArgs $AppArgsValue }
   if ($EnvValue) { $record.userEnv = Resolve-EnvValue $EnvValue }
   $pins = Publish-Profile $record
@@ -2854,6 +3031,7 @@ function Invoke-Rebuild([string] $Which, [string] $AppPath, [switch] $Every) {
       }
       $record.appId = $app.Id
       $record.appKind = $app.Kind
+      $record.family = $app.Family
       $record.launchExe = $app.LaunchExe
       $record.realExe = $app.RealExe
       $record.packageApp = $app.PackageApp
@@ -3169,7 +3347,8 @@ function Invoke-Open([string] $Which) {
     Start-Process -FilePath $launcher -ArgumentList $p.id
   } else {
     Write-Warning "the Start menu shortcut is missing ($($p.shortcut)); starting the app directly"
-    Start-Process -FilePath $p.launchExe -ArgumentList ('--user-data-dir="' + $p.dataDir + '" ' + (Get-RecordValue $p 'extraArgs')).Trim()
+    if ((Get-RecordValue $p 'family') -eq 'telegram') { Set-TelegramOptions $p.dataDir }
+    Start-Process -FilePath $p.launchExe -ArgumentList (Get-LaunchArguments $p)
   }
   "Opening $($p.appName) $($p.name)."
 }
@@ -3267,8 +3446,11 @@ function Invoke-Storage([string] $Which, [switch] $AsJson) {
   "Clearing a profile's cache keeps its sign-in and data: twinbar clean PROFILE"
 }
 
+$script:TelegramCacheNote = "Telegram keeps its cache itself: open the profile, then Settings > Advanced > Manage local storage."
+
 function Invoke-Clean([string] $Which) {
   $p = Find-Profile $Which
+  if ((Get-RecordValue $p 'family') -eq 'telegram') { return $script:TelegramCacheNote }
   Assert-NotRunning $p
   if ((Get-DataDirState $p.dataDir $p.id) -ne 'ours') { Stop-Twinbar "$($p.dataDir) doesn't carry this profile's Twinbar marker, so Twinbar leaves it alone" }
   $before = Get-ProfileStorage $p
@@ -4063,7 +4245,7 @@ function Show-MoreMenu {
   [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
   $about = $menu.Items.Add('About Twinbar')
   $about.Add_Click({
-      [void](Show-GuiMessage $script:Gui.Form ("Twinbar $($script:TwinbarVersion)`r`n`r`nSecond, separately signed-in copies of your Electron apps.`r`n" +
+      [void](Show-GuiMessage $script:Gui.Form ("Twinbar $($script:TwinbarVersion)`r`n`r`nSecond, separately signed-in copies of your Electron apps and Telegram.`r`n" +
           "https://github.com/$($script:Repository) (MIT licence)") 'OK' 'Information')
     })
   $button = $g.Buttons.More
@@ -4133,6 +4315,10 @@ function Clear-SelectedCache {
   $row = Get-SelectedRow
   if (-not $row) { return }
   $form = $script:Gui.Form
+  if ($row.Record.family -eq 'telegram') {
+    [void](Show-GuiMessage $form $script:TelegramCacheNote 'OK' 'Information')
+    return
+  }
   $form.UseWaitCursor = $true
   [Windows.Forms.Application]::DoEvents()
   try { $s = Get-ProfileStorage $row.Record } finally { $form.UseWaitCursor = $false }
@@ -4422,6 +4608,18 @@ function Update-ProfilePreview($State) {
   if ($old) { $old.Dispose() }
 }
 
+# Telegram has its own proxy and theme settings, so for it the window turns
+# Twinbar's off (and says where to find Telegram's).
+function Update-DialogFamily($State) {
+  $a = Get-DialogApp $State
+  $telegram = $null -ne $a -and $a.PSObject.Properties['Family'] -and $a.Family -eq 'telegram'
+  foreach ($control in @($State.Proxy, $State.FindProxy, $State.Appearance)) { $control.Enabled = -not $telegram }
+  if ($telegram) {
+    $State.Proxy.Text = ''
+    $State.Appearance.SelectedIndex = 0
+  }
+}
+
 # For a new profile, the colour follows the name (as on the command line) until
 # it's picked by hand.
 function Update-DefaultColor($State) {
@@ -4503,7 +4701,8 @@ function New-ProfileDialog($Row) {
   $hint.Text = "Leave the badge empty for the name's first letter. Light and dark work for apps that follow Windows. " +
     'Proxy: like http://127.0.0.1:10809 or socks5://127.0.0.1:10808, or empty for none; if it is down, the profile stays offline. ' +
     "Find looks for proxies on this computer. Prefer the HTTP address: some apps (Claude) don't use a SOCKS proxy outside Chromium. " +
-    'Arguments go to the app (like --disable-gpu); environment variables are NAME=value; NAME2=value (not for Store apps).'
+    'Arguments go to the app (like --disable-gpu); environment variables are NAME=value; NAME2=value (not for Store apps). ' +
+    'Telegram keeps its own proxy and theme in each profile (Settings > Advanced, Settings > Chat settings).'
   $hint.AutoSize = $true
   $hint.MaximumSize = New-Object Drawing.Size(($wide + (Get-Scaled 90)), 0)
   $hint.ForeColor = [Drawing.SystemColors]::GrayText
@@ -4551,7 +4750,7 @@ function New-ProfileDialog($Row) {
 
   if ($editing) {
     $r = $Row.Record
-    $appList.Add([pscustomobject]@{ Name = $r.appName; Kind = $r.appKind; Source = $r.launchExe; LaunchExe = $r.launchExe; Id = $r.appId })
+    $appList.Add([pscustomobject]@{ Name = $r.appName; Kind = $r.appKind; Family = $r.family; Source = $r.launchExe; LaunchExe = $r.launchExe; Id = $r.appId })
     [void]$app.Items.Add([string]$r.appName)
     $app.SelectedIndex = 0
     $app.Enabled = $false
@@ -4575,6 +4774,7 @@ function New-ProfileDialog($Row) {
     Update-DefaultColor $state
   }
   $state.Updating = $false
+  Update-DialogFamily $state
 
   $color.Add_DrawItem({
       param($control, $draw)
@@ -4616,7 +4816,7 @@ function New-ProfileDialog($Row) {
       $s.ColorPicked = $true
       Update-ProfilePreview $s
     })
-  $app.Add_SelectedIndexChanged({ $s = $script:Dialog; if (-not $s.Updating) { Update-DefaultColor $s; Update-ProfilePreview $s } })
+  $app.Add_SelectedIndexChanged({ $s = $script:Dialog; if (-not $s.Updating) { Update-DefaultColor $s; Update-DialogFamily $s; Update-ProfilePreview $s } })
   $name.Add_TextChanged({ $s = $script:Dialog; Update-DefaultColor $s; Update-ProfilePreview $s })
   $badge.Add_TextChanged({ Update-ProfilePreview $script:Dialog })
   $style.Add_SelectedIndexChanged({ if (-not $script:Dialog.Updating) { Update-ProfilePreview $script:Dialog } })
@@ -4630,7 +4830,7 @@ function New-ProfileDialog($Row) {
         [void](Show-GuiMessage $s.Form (ConvertTo-Sentence $_.Exception.Message))
         return
       }
-      $s.AppList.Add([pscustomobject]@{ Name = $found.Name; Kind = $found.Kind; Source = $file; LaunchExe = $found.LaunchExe; Id = $found.Id })
+      $s.AppList.Add([pscustomobject]@{ Name = $found.Name; Kind = $found.Kind; Family = $found.Family; Source = $file; LaunchExe = $found.LaunchExe; Id = $found.Id })
       [void]$s.App.Items.Add((Format-AppItem $found))
       $s.App.SelectedIndex = $s.App.Items.Count - 1
     })
@@ -4764,12 +4964,12 @@ function Show-TwinbarWindow([switch] $InTray) {
 
 function Show-Help {
   @"
-Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Electron app.
+Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Electron app or Telegram Desktop.
 
   twinbar new -App APP -Name NAME [-Color C] [-Badge B] [-Style S] [-Appearance A]
               [-Proxy P] [-DataDir DIR] [-AdoptDataDir] [-ShortcutDir DIR]
       Make a profile. APP is the app's .exe, install folder or Start menu
-      shortcut, or a Microsoft Store app's name ("Claude"). Adds "<App> <Name>"
+      shortcut, or its name from twinbar apps ("Telegram", "Claude"). Adds "<App> <Name>"
       to the Start menu; the app then keeps that profile's sign-in, settings
       and data in a folder of its own, with a taskbar button and icon of its own.
         -Color       $($script:Palette.Keys -join ', ') or #RRGGBB
@@ -4819,7 +5019,7 @@ Twinbar $($script:TwinbarVersion): a second, separately signed-in copy of an Ele
       Remove a profile's shortcut (to the Recycle Bin). Its sign-in is kept
       unless you add -DeleteData.
   twinbar apps [-Json]
-      List the Electron apps found in the Start menu and the Microsoft Store.
+      List the Electron apps and Telegram Desktop found in the Start menu and the Microsoft Store.
   twinbar gui [-Tray]
       Open the Twinbar window, with its icon by the clock (right-click it for
       your profiles). -Tray starts with just the icon.

@@ -6,13 +6,43 @@ All notable changes to Twinbar. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-23
+
+Telegram Desktop, the first app that isn't built on Electron.
+
 ### Added
 
+- Telegram Desktop (from telegram.org) gets twins like the Electron apps: its
+  own sign-in, taskbar button, icon, jump list and shortcut. Twinbar starts it
+  with `-workdir <the profile's folder>`, recognises it by `Telegram.exe` with
+  the product name "Telegram Desktop", and finds it in the Start menu, in its
+  folder, or by its shortcut. `twinbar apps` lists it with the kind
+  `telegram`.
+- tg:// links keep opening in your main Telegram: before each start Twinbar
+  turns on Telegram's own `skip-url-scheme-register` option in the profile's
+  `tdata\experimental_options.json`, so the twin doesn't claim the links when
+  it first starts or after an update.
+- A clearer message for apps Twinbar can't twin, saying what they are: built
+  on CEF (Steam, Spotify and the like), a Chromium browser (use its own
+  profiles), another Qt app, or Telegram from the Microsoft Store (install
+  Telegram Desktop from telegram.org instead).
 - A website, [sadrazkh.github.io/twinbar](https://sadrazkh.github.io/twinbar/),
   in English and Persian: an interactive desktop (taskbar buttons, the icon by
   the clock and its menu), an icon designer that writes the `twinbar new`
   command, the proxy kill switch shown live, a terminal demo, and the latest
   release from GitHub.
+
+### Changed
+
+- Telegram keeps its proxy and theme in each profile (Settings > Advanced >
+  Connection type, Settings > Chat settings), so `-Proxy` and `-Appearance`
+  are refused for it, and the New/Edit window turns them off when Telegram is
+  picked. Its cache is cleared from Telegram (Settings > Advanced > Manage
+  local storage); `twinbar clean` says so.
+- The extra arguments can't set `-workdir` either: the data folder is
+  Twinbar's to set.
+- `-App` takes the name `twinbar apps` shows for any app it lists
+  (`-App Telegram`, `-App Bruno`), not only for Microsoft Store apps.
 
 ## [0.9.0] - 2026-11-22
 

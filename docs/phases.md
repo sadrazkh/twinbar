@@ -264,11 +264,45 @@ Electron app, plus the real installed apps when run by hand.
   backup (which picks the next free name, "Work 2", while the original is
   still there); the New/Edit window has Arguments and Environment.
 
+## Phase 9: Telegram Desktop (0.10.0)
+
+Researched first, from Telegram Desktop's source (7.4.5) and on Windows 11
+with the installed Telegram:
+
+- `-workdir <dir>` moves everything Telegram keeps (`tdata`, logs, updates)
+  into that folder, and the one-copy check is a local server named after
+  the MD5 of the folder's path, so a second folder runs alongside the first.
+  `-many` was removed in 3.4 and is never passed.
+- The installed Telegram sets the fixed process AppUserModelID
+  `Telegram.TelegramDesktop` whatever the folder, and sets no window-level
+  ID, so the launcher's window-level ID gives the twin its own button.
+  Changing the process ID would stop its notifications, so it's left alone.
+- On its first start and after each update, Telegram registers `tg://`,
+  `tonsite://` and `ton://` with `-workdir` and its own folder, which would
+  send the main Telegram's links to the twin. Its `skip-url-scheme-register`
+  option (`tdata\experimental_options.json`, read at start) stops that; both
+  `twinbar.ps1` and the launcher turn it on before every start.
+- After its own restart Telegram passes `-workdir "C:/.../dir/"` (forward
+  slashes, a slash at the end), so finding a profile's processes normalises
+  the path; the launcher compares the parsed argument, not text.
+- It's recognised as `Telegram.exe` whose product name is "Telegram
+  Desktop". `Updater.exe` and the uninstaller next to it are skipped when
+  looking in its folder. The Store edition is refused: it can't be given a
+  folder.
+- Proxy, theme and cache are Telegram's own settings in each profile, so
+  `-Proxy`, `-Appearance` and `clean` say where to find them instead.
+- Other apps that can't be twinned get a reason: CEF (`libcef.dll`),
+  Chromium browsers (`chrome.dll`, `msedge.dll`), other Qt apps.
+- Tests: the fake app built as `Telegram.exe` with Telegram's product name,
+  accepting `-workdir`; `-RealApp` with the real Telegram checks that the
+  `tg://` handler is the same afterwards.
+
 ## Not planned
 
 - macOS or Linux. On a Mac, use [DoppelDock](https://github.com/ZarinLab/doppeldock),
   which inspired this project.
-- Apps that aren't built on Electron.
+- Apps that aren't built on Electron, apart from Telegram Desktop: most have
+  no way to be given a second data folder.
 - Patching, injecting into or re-signing apps, or bypassing licence checks.
 - Analytics, or any network connection beyond the update check, the IP check
   and finding proxies (see SECURITY.md).

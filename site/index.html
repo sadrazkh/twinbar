@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Twinbar · Two of every app on Windows</title>
-<meta name="description" content="Twinbar gives Slack, Claude, Postman, Discord and other Electron apps a second, separately signed-in copy on Windows, with its own taskbar button and icon. Free and open source.">
+<meta name="description" content="Twinbar gives Slack, Claude, Postman, Discord, Telegram and other Electron apps a second, separately signed-in copy on Windows, with its own taskbar button and icon. Free and open source.">
 <meta name="theme-color" content="#0a0c13">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Twinbar · Two of every app on Windows">
-<meta property="og:description" content="A second, separately signed-in copy of your Electron apps, with its own taskbar button, icon, proxy and kill switch.">
+<meta property="og:description" content="A second, separately signed-in copy of your Electron apps and Telegram, with its own taskbar button, icon, proxy and kill switch.">
 <meta property="og:url" content="https://sadrazkh.github.io/twinbar/">
 <meta property="og:image" content="https://github.com/sadrazkh/twinbar/raw/main/docs/styles.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -480,7 +480,7 @@ footer a:hover { color: var(--text); }
     <div class="wrap">
       <span class="eyebrow"><span class="dot"></span><span data-i18n="hero.eyebrow">Free &amp; open source · for Windows 10 and 11</span></span>
       <h1 data-i18n="hero.title">Two of every app.<br><span class="grad">One taskbar.</span></h1>
-      <p class="lead" data-i18n="hero.sub">Twinbar gives Slack, Claude, Postman, Discord and other Electron apps a second copy on Windows that signs in separately, with its own taskbar button, its own icon and its own data. The original app isn't touched.</p>
+      <p class="lead" data-i18n="hero.sub">Twinbar gives Slack, Claude, Postman, Discord, Telegram and other Electron apps a second copy on Windows that signs in separately, with its own taskbar button, its own icon and its own data. The original app isn't touched.</p>
       <div class="cta">
         <a class="btn btn-primary" id="heroDl" href="https://github.com/sadrazkh/twinbar/releases/latest">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10 4.5v7H3zm8-1.15L21 3v8.5H11zM3 12.5h7v7L3 18.5zm8 0h10V21l-10-1.35z"/></svg>
@@ -578,7 +578,7 @@ footer a:hover { color: var(--text); }
 
   <!-- apps -->
   <div class="works">
-    <p data-i18n="works.title">Works with Electron apps such as</p>
+    <p data-i18n="works.title">Works with Telegram and Electron apps such as</p>
     <div class="marquee"><div class="track" id="track"></div></div>
   </div>
 
@@ -767,7 +767,7 @@ footer a:hover { color: var(--text); }
           <div><span class="flabel" data-i18n="dl.verify">Check the download</span><div class="cmd"><code id="verifyCmd"><span class="c"># SHA256SUMS lists every file</span>
 (<span class="p">Get-FileHash</span> .\<span class="v" id="vfFile">Twinbar-Setup-0.9.0.exe</span>).Hash
 <span class="p">gh</span> attestation verify .\<span class="v" id="vfFile2">Twinbar-Setup-0.9.0.exe</span> <span class="k">-R</span> sadrazkh/twinbar</code></div></div>
-          <div class="req"><span data-i18n="dl.r1">Windows 10 or 11</span><span data-i18n="dl.r2">No admin rights</span><span data-i18n="dl.r3">Electron apps</span><span data-i18n="dl.r4">~2 MB</span></div>
+          <div class="req"><span data-i18n="dl.r1">Windows 10 or 11</span><span data-i18n="dl.r2">No admin rights</span><span data-i18n="dl.r3">Electron apps, Telegram</span><span data-i18n="dl.r4">~2 MB</span></div>
           <p class="small" data-i18n="dl.zip">Prefer a zip? Each release has twinbar-x.y.z.zip: unpack it and run .\twinbar.cmd install.</p>
         </div>
       </div>
@@ -837,11 +837,11 @@ footer a:hover { color: var(--text); }
       'nav.play': 'Try it', 'nav.features': 'Features', 'nav.how': 'How it works', 'nav.proxy': 'Proxy', 'nav.download': 'Download', 'nav.faq': 'FAQ',
       'hero.eyebrow': 'Free &amp; open source · for Windows 10 and 11',
       'hero.title': 'Two of every app.<br><span class="grad">One taskbar.</span>',
-      'hero.sub': 'Twinbar gives Slack, Claude, Postman, Discord and other Electron apps a second copy on Windows that signs in separately, with its own taskbar button, its own icon and its own data. The original app isn\'t touched.',
+      'hero.sub': 'Twinbar gives Slack, Claude, Postman, Discord, Telegram and other Electron apps a second copy on Windows that signs in separately, with its own taskbar button, its own icon and its own data. The original app isn\'t touched.',
       'hero.download': 'Download for Windows', 'hero.try': 'Design a twin',
       'hero.meta': 'no admin rights · nothing injected · MIT licence',
       'hero.hint': 'Try it: click the taskbar buttons, or the Twinbar icon by the clock.',
-      'works.title': 'Works with Electron apps such as',
+      'works.title': 'Works with Telegram and Electron apps such as',
       'play.kicker': 'Try it here', 'play.title': 'Design your twin',
       'play.sub': 'Pick a look. This is the icon Twinbar draws, and the command that makes the profile.',
       'play.app': 'App', 'play.name': 'Profile name', 'play.badge': 'Badge', 'play.badgeHint': 'first letter of the name',
@@ -879,7 +879,7 @@ footer a:hover { color: var(--text); }
       'dl.s2': 'Windows may say “Windows protected your PC”: click <b>More info</b>, then <b>Run anyway</b>. (It isn\'t code-signed yet.)',
       'dl.s3': 'Open <b>Twinbar</b> from the Start menu and click <b>New profile...</b>',
       'dl.btn': 'Download the installer', 'dl.notes': 'What\'s new', 'dl.other': 'Other ways', 'dl.scoop': 'With Scoop', 'dl.verify': 'Check the download',
-      'dl.r1': 'Windows 10 or 11', 'dl.r2': 'No admin rights', 'dl.r3': 'Electron apps', 'dl.r4': 'Tiny download',
+      'dl.r1': 'Windows 10 or 11', 'dl.r2': 'No admin rights', 'dl.r3': 'Electron apps, Telegram', 'dl.r4': 'Tiny download',
       'dl.zip': 'Prefer a zip? Each release has <code>twinbar-x.y.z.zip</code>: unpack it and run <code>.\\twinbar.cmd install</code>.',
       'dl.released': 'released', 'dl.latest': 'latest',
       'news.kicker': 'Releases', 'news.title': 'A step further with every version', 'news.all': 'All releases',
@@ -897,11 +897,11 @@ footer a:hover { color: var(--text); }
       'nav.play': 'امتحانش کن', 'nav.features': 'امکانات', 'nav.how': 'چطور کار می‌کند', 'nav.proxy': 'پروکسی', 'nav.download': 'دانلود', 'nav.faq': 'پرسش‌ها',
       'hero.eyebrow': 'رایگان و متن‌باز · برای ویندوز ۱۰ و ۱۱',
       'hero.title': 'هر برنامه، دو نسخه.<br><span class="grad">کنار هم روی یک تسک‌بار.</span>',
-      'hero.sub': 'Twinbar به Slack، Claude، Postman، Discord و بقیه‌ی برنامه‌های الکترونی روی ویندوز یک نسخه‌ی دوم می‌دهد که جدا لاگین می‌شود؛ با دکمه‌ی تسک‌بار، آیکن و اطلاعات مخصوص خودش. به برنامه‌ی اصلی هیچ دستی نمی‌خورد.',
+      'hero.sub': 'Twinbar به Slack، Claude، Postman، Discord، تلگرام و بقیه‌ی برنامه‌های الکترونی روی ویندوز یک نسخه‌ی دوم می‌دهد که جدا لاگین می‌شود؛ با دکمه‌ی تسک‌بار، آیکن و اطلاعات مخصوص خودش. به برنامه‌ی اصلی هیچ دستی نمی‌خورد.',
       'hero.download': 'دانلود برای ویندوز', 'hero.try': 'یک دوقلو بساز',
       'hero.meta': 'بدون نیاز به ادمین · بدون تزریق کد · مجوز MIT',
       'hero.hint': 'امتحانش کن: روی دکمه‌های تسک‌بار کلیک کن، یا روی آیکن Twinbar کنار ساعت.',
-      'works.title': 'با برنامه‌های الکترونی کار می‌کند، مثل',
+      'works.title': 'با تلگرام و برنامه‌های الکترونی کار می‌کند، مثل',
       'play.kicker': 'همین‌جا امتحان کن', 'play.title': 'دوقلوی خودت را بساز',
       'play.sub': 'یک ظاهر انتخاب کن. Twinbar دقیقاً همین آیکن را می‌کشد، و این هم دستوری است که پروفایل را می‌سازد.',
       'play.app': 'برنامه', 'play.name': 'اسم پروفایل', 'play.badge': 'نشان', 'play.badgeHint': 'حرف اول اسم',
@@ -939,7 +939,7 @@ footer a:hover { color: var(--text); }
       'dl.s2': 'شاید ویندوز بگوید «Windows protected your PC»: روی <b>More info</b> و بعد <b>Run anyway</b> بزن. (هنوز امضای کد ندارد.)',
       'dl.s3': '<b>Twinbar</b> را از منوی استارت باز کن و <b>New profile...</b> را بزن.',
       'dl.btn': 'دانلود نصب‌کننده', 'dl.notes': 'تازه‌ها', 'dl.other': 'راه‌های دیگر', 'dl.scoop': 'با Scoop', 'dl.verify': 'سالم بودن فایل را چک کن',
-      'dl.r1': 'ویندوز ۱۰ یا ۱۱', 'dl.r2': 'بدون ادمین', 'dl.r3': 'برنامه‌های الکترونی', 'dl.r4': 'حجم خیلی کم',
+      'dl.r1': 'ویندوز ۱۰ یا ۱۱', 'dl.r2': 'بدون ادمین', 'dl.r3': 'برنامه‌های الکترونی و تلگرام', 'dl.r4': 'حجم خیلی کم',
       'dl.zip': 'zip را ترجیح می‌دهی؟ هر نسخه یک <code>twinbar-x.y.z.zip</code> دارد: بازش کن و <code>.\\twinbar.cmd install</code> را اجرا کن.',
       'dl.released': 'منتشرشده در', 'dl.latest': 'آخرین',
       'news.kicker': 'نسخه‌ها', 'news.title': 'هر نسخه، یک قدم جلوتر', 'news.all': 'همه‌ی نسخه‌ها',
@@ -962,8 +962,9 @@ footer a:hover { color: var(--text); }
     { i: '🏪', g: 'rgba(20,184,166,.25)', en: ['Store apps too', 'Normal installs, Squirrel installs (Slack, Discord, Postman) and Microsoft Store apps such as Claude.'], fa: ['برنامه‌های استور هم', 'نصب‌های معمولی، نصب‌های Squirrel (مثل Slack، Discord و Postman) و برنامه‌های مایکروسافت استور مثل Claude.'] },
     { i: '🛡️', g: 'rgba(34,197,94,.22)', en: ['Proxy with a kill switch', 'Send one profile through your VPN\'s proxy. If the proxy goes down, the profile goes offline instead of around it.'], fa: ['پروکسی با کیل‌سوییچ', 'یک پروفایل را از پروکسی VPN رد کن. اگر پروکسی قطع شود، پروفایل آفلاین می‌شود، نه این‌که دورش بزند.'] },
     { i: '🔎', g: 'rgba(245,158,11,.22)', en: ['IP check and proxy finder', 'See which IP the world sees for each profile, and find the proxies running on your computer.'], fa: ['چک آی‌پی و پیدا کردن پروکسی', 'ببین دنیا برای هر پروفایل چه آی‌پی‌ای می‌بیند، و پروکسی‌های روشن روی کامپیوترت را پیدا کن.'] },
-    { i: '🕒', g: 'rgba(96,165,250,.25)', n: 1, en: ['By the clock', 'Right-click the tray icon for your profiles, which ones are running and whether each proxy is up. Starts with Windows if you like.'], fa: ['کنار ساعت', 'روی آیکن کنار ساعت راست‌کلیک کن: پروفایل‌ها، کدام روشن‌اند و پروکسی هرکدام وصل است یا نه. اگر بخواهی با ویندوز بالا می‌آید.'] },
-    { i: '🔄', g: 'rgba(167,139,250,.25)', n: 1, en: ['Updates itself', 'Tells you when a new version is out, checks the download\'s SHA-256 and installs it in one click.'], fa: ['خودش آپدیت می‌شود', 'نسخه‌ی جدید که بیاید خبرت می‌کند، SHA-256 فایل را چک می‌کند و با یک کلیک نصبش می‌کند.'] },
+    { i: '✈️', g: 'rgba(42,171,238,.25)', n: 1, en: ['Telegram too', 'A second Telegram Desktop with its own sign-in, window and icon, past the three-account limit. Its links stay with your main Telegram.'], fa: ['تلگرام هم', 'یک تلگرام دسکتاپ دوم با لاگین، پنجره و آیکن خودش، بدون سقف سه حساب. لینک‌هایش همچنان با تلگرام اصلی‌ات باز می‌شوند.'] },
+    { i: '🕒', g: 'rgba(96,165,250,.25)', en: ['By the clock', 'Right-click the tray icon for your profiles, which ones are running and whether each proxy is up. Starts with Windows if you like.'], fa: ['کنار ساعت', 'روی آیکن کنار ساعت راست‌کلیک کن: پروفایل‌ها، کدام روشن‌اند و پروکسی هرکدام وصل است یا نه. اگر بخواهی با ویندوز بالا می‌آید.'] },
+    { i: '🔄', g: 'rgba(167,139,250,.25)', en: ['Updates itself', 'Tells you when a new version is out, checks the download\'s SHA-256 and installs it in one click.'], fa: ['خودش آپدیت می‌شود', 'نسخه‌ی جدید که بیاید خبرت می‌کند، SHA-256 فایل را چک می‌کند و با یک کلیک نصبش می‌کند.'] },
     { i: '💾', g: 'rgba(46,224,198,.22)', n: 1, en: ['Backup and restore', 'A profile\'s settings and sign-in in one zip. Restore it later, on another PC, or next to the original.'], fa: ['بکاپ و بازگردانی', 'تنظیمات و لاگین یک پروفایل در یک فایل zip؛ بعداً، روی کامپیوتر دیگر یا کنار نسخه‌ی اصلی برش گردان.'] },
     { i: '🧹', g: 'rgba(244,114,182,.22)', n: 1, en: ['Cache cleaner', 'See what each profile takes and clear its cache. The sign-in stays.'], fa: ['پاک‌کردن کش', 'ببین هر پروفایل چقدر جا گرفته و کشش را پاک کن. لاگین سر جایش می‌ماند.'] },
     { i: '⌨️', g: 'rgba(99,102,241,.25)', en: ['A window, or the command line', 'Everything in a friendly window, and the same in a terminal: new, change, doctor, backup, update...'], fa: ['پنجره یا خط فرمان', 'همه‌چیز در یک پنجره‌ی ساده، و همان در ترمینال: new، change، doctor، backup، update و...'] },
@@ -973,8 +974,10 @@ footer a:hover { color: var(--text); }
   var FAQ = [
     { en: ['Does it change the app?', 'No. Twinbar starts the installed app with a data folder of its own and sets window properties from outside. Nothing is injected, patched or re-signed, and the original app keeps working exactly as before.'],
       fa: ['برنامه را تغییر می‌دهد؟', 'نه. Twinbar برنامه‌ی نصب‌شده را با پوشه‌ی داده‌ی جدا اجرا می‌کند و از بیرون چند ویژگی روی پنجره‌اش می‌گذارد. نه کدی تزریق می‌شود، نه پچی، نه امضای دوباره؛ برنامه‌ی اصلی دقیقاً مثل قبل کار می‌کند.'] },
-    { en: ['Which apps work?', 'Apps built on Electron: Slack, Discord, Postman, Bruno, Cursor, VS Code, Figma, Signal, MongoDB Compass, Obsidian, Claude from the Microsoft Store and many more. <code>twinbar apps</code> lists the ones it finds on your PC.'],
-      fa: ['با چه برنامه‌هایی کار می‌کند؟', 'برنامه‌هایی که روی Electron ساخته شده‌اند: Slack، Discord، Postman، Bruno، Cursor، VS Code، Figma، Signal، MongoDB Compass، Obsidian، Claude از مایکروسافت استور و خیلی‌های دیگر. دستور <code>twinbar apps</code> آن‌هایی را که روی کامپیوترت پیدا می‌کند نشان می‌دهد.'] },
+    { en: ['Which apps work?', 'Apps built on Electron: Slack, Discord, Postman, Bruno, Cursor, VS Code, Figma, Signal, MongoDB Compass, Obsidian, Claude from the Microsoft Store and many more, and Telegram Desktop from telegram.org. <code>twinbar apps</code> lists the ones it finds on your PC.'],
+      fa: ['با چه برنامه‌هایی کار می‌کند؟', 'برنامه‌هایی که روی Electron ساخته شده‌اند: Slack، Discord، Postman، Bruno، Cursor، VS Code، Figma، Signal، MongoDB Compass، Obsidian، Claude از مایکروسافت استور و خیلی‌های دیگر، و تلگرام دسکتاپ از telegram.org. دستور <code>twinbar apps</code> آن‌هایی را که روی کامپیوترت پیدا می‌کند نشان می‌دهد.'] },
+    { en: ['Does it work with Telegram?', 'Yes, Telegram Desktop from telegram.org (not the Microsoft Store edition). Each twin has its own sign-in and its own window, with no limit of three accounts, and <code>tg://</code> links keep opening your main Telegram. Set the twin\'s proxy and theme inside Telegram: they\'re kept for each profile.'],
+      fa: ['با تلگرام هم کار می‌کند؟', 'بله، با تلگرام دسکتاپ از telegram.org (نه نسخه‌ی مایکروسافت استور). هر نسخه لاگین و پنجره‌ی خودش را دارد، بدون سقف سه حساب، و لینک‌های <code>tg://</code> همچنان در تلگرام اصلی‌ات باز می‌شوند. پروکسی و تم نسخه‌ی دوم را داخل خود تلگرام تنظیم کن؛ برای هر پروفایل جدا نگه داشته می‌شود.'] },
     { en: ['Will my sign-in survive app updates?', 'Yes. Squirrel apps\' updates are followed, Store apps are found by their package, and Repair fixes a profile if the app moved. The sign-in lives in the profile\'s own folder.'],
       fa: ['با آپدیت برنامه لاگینم می‌پرد؟', 'نه. آپدیت برنامه‌های Squirrel دنبال می‌شود، برنامه‌های استور از روی پکیجشان پیدا می‌شوند، و اگر برنامه جابه‌جا شده باشد Repair درستش می‌کند. لاگین در پوشه‌ی خود پروفایل است.'] },
     { en: ['Where is my data, and what happens when I remove a profile?', 'In <code>%APPDATA%\\Twinbar\\data</code> (for Store apps, <code>%USERPROFILE%\\Twinbar</code>). Removing a profile keeps its sign-in unless you ask, and even then it goes to the Recycle Bin.'],
@@ -990,6 +993,7 @@ footer a:hover { color: var(--text); }
   ];
 
   var FALLBACK_RELEASES = [
+    ['0.10.0', '2026-11-23', '✈️ Telegram Desktop, twinned'],
     ['0.9.0', '2026-11-22', '💾 Storage, cache and backups, plus your own switches'],
     ['0.8.0', '2026-11-22', '🕒 Twinbar by the clock'],
     ['0.7.0', '2026-11-22', '🔄 Twinbar updates itself, and finds your proxy for you'],
@@ -1062,7 +1066,8 @@ footer a:hover { color: var(--text); }
     { name: 'Discord', id: 'discord', c1: '#7d8cff', c2: '#3b48c7', letter: 'D' },
     { name: 'Bruno', id: 'bruno', c1: '#f6c453', c2: '#c77d10', letter: 'B' },
     { name: 'Cursor', id: 'cursor', c1: '#6b7280', c2: '#1f2937', letter: 'C' },
-    { name: 'Obsidian', id: 'obsidian', c1: '#a78bfa', c2: '#5b21b6', letter: 'O' }
+    { name: 'Obsidian', id: 'obsidian', c1: '#a78bfa', c2: '#5b21b6', letter: 'O' },
+    { name: 'Telegram', id: 'telegram', c1: '#5fc8f8', c2: '#1d83c4', letter: 'T', own: 1 }
   ];
 
   /* ---------------------------------------------------------- desktop demo */
@@ -1144,7 +1149,7 @@ footer a:hover { color: var(--text); }
   tick(); setInterval(tick, 20000);
 
   /* ------------------------------------------------------------- marquee */
-  var MARQ = [['Slack', '#7f6cf2'], ['Claude', '#d97a4e'], ['Postman', '#f2683f'], ['Discord', '#5865f2'], ['Bruno', '#e0a526'], ['Cursor', '#374151'], ['VS Code', '#2f80ed'], ['Figma', '#a259ff'], ['Signal', '#3a76f0'], ['MongoDB Compass', '#13aa52'], ['Obsidian', '#7c3aed'], ['Notion', '#4b5563'], ['GitHub Desktop', '#6e40c9'], ['Insomnia', '#7e1f86']];
+  var MARQ = [['Slack', '#7f6cf2'], ['Claude', '#d97a4e'], ['Postman', '#f2683f'], ['Discord', '#5865f2'], ['Bruno', '#e0a526'], ['Cursor', '#374151'], ['VS Code', '#2f80ed'], ['Figma', '#a259ff'], ['Signal', '#3a76f0'], ['MongoDB Compass', '#13aa52'], ['Obsidian', '#7c3aed'], ['Notion', '#4b5563'], ['GitHub Desktop', '#6e40c9'], ['Insomnia', '#7e1f86'], ['Telegram', '#2aabee']];
   (function () {
     var html = MARQ.map(function (a) { return '<span class="chip"><i style="background:' + a[1] + '">' + a[0][0] + '</i>' + a[0] + '</span>'; }).join('');
     $('#track').innerHTML = html + html;
@@ -1203,13 +1208,17 @@ footer a:hover { color: var(--text); }
     $('#pgOrig').src = drawIcon(app, 'original', hex, '', 96);
     $('#pgStartName').textContent = app.name + ' ' + shown;
     $('#pgId').textContent = id;
-    $('#pgProxy').disabled = !P.proxy; $('#pgProxy').style.opacity = P.proxy ? 1 : .5;
+    // Telegram keeps its own proxy and theme, so Twinbar's are off for it.
+    $('#pgAppear').style.opacity = app.own ? .45 : 1; $('#pgAppear').style.pointerEvents = app.own ? 'none' : '';
+    $('#pgProxyOn').disabled = !!app.own; $('#pgProxyOn').closest('.switch').style.opacity = app.own ? .45 : 1;
+    var proxyOn = P.proxy && !app.own;
+    $('#pgProxy').disabled = !proxyOn; $('#pgProxy').style.opacity = proxyOn ? 1 : .5;
     var parts = [['p', 'twinbar'], ['p', 'new'], ['k', '-App'], ['v', q(app.name)], ['k', '-Name'], ['v', q(shown)]];
     if (P.color) parts.push(['k', '-Color'], ['v', colorName || hex]);
     if (P.badge) parts.push(['k', '-Badge'], ['v', q(P.badge)]);
     if (P.style !== 'tint+badge') parts.push(['k', '-Style'], ['v', P.style]);
-    if (P.appearance !== 'system') parts.push(['k', '-Appearance'], ['v', P.appearance]);
-    if (P.proxy && P.proxyUrl) parts.push(['k', '-Proxy'], ['v', P.proxyUrl]);
+    if (P.appearance !== 'system' && !app.own) parts.push(['k', '-Appearance'], ['v', P.appearance]);
+    if (proxyOn && P.proxyUrl) parts.push(['k', '-Proxy'], ['v', P.proxyUrl]);
     $('#pgCmdText').innerHTML = parts.map(function (p) { return '<span class="' + p[0] + '">' + esc(p[1]) + '</span>'; }).join(' ');
   }
 

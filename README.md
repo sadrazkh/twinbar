@@ -5,8 +5,9 @@
 [![MIT licence](https://img.shields.io/github/license/sadrazkh/twinbar)](LICENSE)
 [![Website](https://img.shields.io/badge/website-sadrazkh.github.io%2Ftwinbar-7c5cff)](https://sadrazkh.github.io/twinbar/)
 
-A second, separately signed-in copy of your Electron apps on Windows: work and
-personal Slack, two Claude or Postman accounts, a test login next to your real one.
+A second, separately signed-in copy of your Electron apps and Telegram on
+Windows: work and personal Slack or Telegram, two Claude or Postman accounts, a
+test login next to your real one.
 
 **[Website: try it in your browser](https://sadrazkh.github.io/twinbar/)**, with an
 interactive desktop and an icon designer that writes the command for you
@@ -29,7 +30,11 @@ the same time. Microsoft Store apps such as Claude work too.
 - Nothing else: Twinbar is one PowerShell script that runs with the Windows
   PowerShell 5.1 and .NET Framework built into Windows. No admin rights needed.
 - The app must be built on Electron (Slack, Discord, Postman, Bruno, VS Code,
-  Cursor, Figma, Signal, MongoDB Compass, Claude, ...).
+  Cursor, Figma, Signal, MongoDB Compass, Claude, ...), or be Telegram Desktop
+  from telegram.org (see [Telegram](#telegram)). For other apps Twinbar says
+  why it can't twin them: Chromium browsers have profiles of their own, and
+  apps built on CEF (Steam, Spotify) or most other frameworks have no way to
+  be given a second data folder.
 
 ## Get it
 
@@ -107,8 +112,8 @@ profiles too.
 ## Use the command line
 
 Make a profile. `-App` takes the app's `.exe`, its install folder or its Start
-menu shortcut, or a Microsoft Store app's name (`twinbar apps` lists what it
-finds):
+menu shortcut, or the name `twinbar apps` shows for it (a Microsoft Store app's
+name works too):
 
 ```powershell
 .\twinbar.cmd new -App "C:\Program Files\Bruno\Bruno.exe" -Name Work
@@ -162,7 +167,7 @@ digits, spaces, `.`, `_` and `-`.
 | `storage [PROFILE] [-Json]` | How much each profile's data takes, and how much of that is cache |
 | `clean PROFILE` | Clear a profile's cache; its sign-in and data stay |
 | `backup PROFILE [-File FILE]` / `restore FILE [-Name NAME]` | Back a profile up to a zip, and make it again from one (see [Storage, cache and backups](#storage-cache-and-backups)) |
-| `apps [-Json]` | The Electron apps found in the Start menu and the Microsoft Store, with what to give `-App` |
+| `apps [-Json]` | The Electron apps and Telegram found in the Start menu and the Microsoft Store, with what to give `-App` |
 | `gui [-Tray]` | Open the Twinbar window (with `-Tray`, just its icon by the clock) |
 | `settings [NAME on\|off]` | Show or change Twinbar's settings: `updates` (check once a day), `tray` (closing the window keeps the icon by the clock), `startup` (start with Windows) |
 | `install [-Dir DIR] [-AddToPath]` / `uninstall` | Install Twinbar for you, or remove it (profiles stay) |
@@ -277,12 +282,46 @@ asks you to sign in again; Twinbar says so when that's the case.
 In the window, right-click a profile for **Clear cache...** and **Back up...**;
 **More...** has **Storage of the profiles** and **Restore a backup...**.
 
+## Telegram
+
+Telegram Desktop isn't built on Electron, but it can keep its data in a folder
+you give it, so Twinbar twins it the same way: its own sign-in, chats and
+settings, its own taskbar button, icon, jump list and Start menu entry. Unlike
+Telegram's own account switcher, it's a separate window, with no limit of
+three accounts.
+
+```powershell
+.\twinbar.cmd new -App Telegram -Name Work -Color teal
+.\twinbar.cmd open "Telegram Work"
+```
+
+What's different from an Electron app:
+
+- **Links stay with your main Telegram.** Telegram claims `tg://` links on its
+  first start and after each update; Twinbar turns on Telegram's own
+  `skip-url-scheme-register` option in each twin (in its
+  `tdata\experimental_options.json`) before starting it, so links keep
+  opening your main Telegram.
+- **Proxy and theme are Telegram's own,** kept for each profile: Settings >
+  Advanced > Connection type, and Settings > Chat settings. `-Proxy` and
+  `-Appearance` are refused for Telegram, and the window turns them off.
+- **Leave "Launch Telegram when system starts" off in the twin:** Telegram has
+  one start-up entry, so turning it on there would replace your main
+  Telegram's.
+- **Notifications** from the twin show under Telegram's name: Telegram sends
+  them as the app it is, and changing that would stop them showing at all.
+- **The cache** is cleared from Telegram: Settings > Advanced > Manage local
+  storage. `twinbar storage` and backups work as for other profiles.
+- **Telegram from the Microsoft Store** can't be given a folder of its own;
+  use Telegram Desktop from telegram.org.
+
 ## How it works
 
 Electron apps accept `--user-data-dir=<folder>`: everything the app keeps about
 you (sign-in, settings, caches) then lives in that folder. A second folder means
 a second, independent copy, and Electron's one-copy-at-a-time lock is per
-folder, so both copies can run together.
+folder, so both copies can run together. Telegram Desktop does the same with
+`-workdir <folder>`: its one-copy check is per folder too.
 
 The taskbar groups windows by their AppUserModelID. Electron apps set one for
 the whole app, so on its own a second copy would join the original's button.
@@ -302,6 +341,7 @@ quits after it closes.
 | Profile data | `%APPDATA%\Twinbar\data\<app>\<name>\`, with a small `.twinbar-profile` marker file |
 | Profile records | `%APPDATA%\Twinbar\profiles\<app>.<name>.json` |
 | Normal installs | The app's own `.exe` is started. |
+| Telegram Desktop | `Telegram.exe` is started with `-workdir` and the profile's folder. |
 | Squirrel installs (Slack, Discord, Postman...) | The launcher in the app's install folder is started; it always runs the newest version, so profiles keep working after the app updates. |
 | Microsoft Store apps (Claude...) | Started through Windows' package activation, with the profile's arguments. Their data is kept in `%USERPROFILE%\Twinbar\<app>\<name>\`: Windows redirects what a Store app writes under AppData into the app's own package, where Twinbar couldn't see or remove it. |
 | The Twinbar window | `Twinbar.exe` in the install folder, next to `twinbar.ps1`, compiled on your computer by `install`. It runs the script's window inside PowerShell without a console, with its own icon and taskbar button. |
